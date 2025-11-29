@@ -119,22 +119,24 @@ class Index(Base):
 
 class IndexHistory(Base):
     __tablename__ = 'index_history'
-    
+
     id = Column(Integer, primary_key=True)
     index_id = Column(Integer, ForeignKey('indices.id'), nullable=False)
     j_date = Column(String(10), nullable=False)  # تاریخ شمسی YYYY-MM-DD
     date = Column(Date, nullable=False)  # تاریخ میلادی
     weekday = Column(String(10))
+    value = Column(Numeric(15, 2))
+    volume = Column(BigInteger)
+    change_percent = Column(Numeric(5, 2))
     open_price = Column(Numeric(15, 2))
     high_price = Column(Numeric(15, 2))
     low_price = Column(Numeric(15, 2))
     close_price = Column(Numeric(15, 2))
     adj_close = Column(Numeric(15, 2))
-    volume = Column(BigInteger)
-    
+
     # ارتباط با جدول شاخص
     index = relationship("Index", back_populates="history")
-    
+
     __table_args__ = (
         UniqueConstraint('index_id', 'j_date', name='uq_index_date'),
     )
