@@ -311,10 +311,9 @@ def main():
     parser.add_argument('--interval', type=int, default=None, help='Update interval in seconds')
     
     args = parser.parse_args()
-    
-    collector = TSEDataCollector()
-    
+
     try:
+        collector = TSEDataCollector()
         if args.mode == 'full':
             results = collector.run_full_update()
             print(f"Update completed: {results}")
