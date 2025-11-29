@@ -16,7 +16,7 @@ elif DATABASE_TYPE == "postgresql":
     )
 
 # تنظیمات API
-API_BASE_URL = "http://cdn.tsetmc.com"
+API_BASE_URL = "http://www.tsetmc.com/tsev2/data"
 API_TIMEOUT = 30  # ثانیه
 MAX_RETRIES = 3
 RETRY_DELAY = 1  # ثانیه
