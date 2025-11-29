@@ -28,6 +28,12 @@ class DatabaseBase(ABC):
     def get_session(self) -> Session:
         """دریافت سشن دیتابیس"""
         return self.SessionLocal()
+
+    def close(self):
+        """بستن اتصال دیتابیس"""
+        if hasattr(self, 'engine') and self.engine:
+            self.engine.dispose()
+            logger.info("Database connection closed")
     
     def load_sectors_from_file(self):
         """بارگذاری داده‌های صنایع از فایل"""
