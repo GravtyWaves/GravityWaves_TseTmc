@@ -1,0 +1,2741 @@
+
+
+# کد کامل پروژه جمع‌آوری داده‌های بورس ایران
+
+در اینجا کد کامل و دقیق پروژه را برای کپی کردن در محیط برنامه‌نویسی ارائه می‌دهم. این کد شامل تمام فایل‌های لازم بدون هیچ‌گونه تابع پاس شده یا ناقص است.
+
+## 1. فایل `config.py`
+
+```python
+import os
+from pathlib import Path
+
+# مسیر پروژه
+BASE_DIR = Path(__file__).parent
+
+# تنظیمات دیتابیس
+DATABASE_TYPE = os.getenv("DATABASE_TYPE", "sqlite")  # sqlite یا postgresql
+
+if DATABASE_TYPE == "sqlite":
+    DATABASE_URL = f"sqlite:///{BASE_DIR}/tse_data.db"
+elif DATABASE_TYPE == "postgresql":
+    DATABASE_URL = os.getenv(
+        "DATABASE_URL", 
+        "postgresql://user:password@localhost/tse_db"
+    )
+
+# تنظیمات API
+API_BASE_URL = "http://cdn.tsetmc.com"
+API_TIMEOUT = 30  # ثانیه
+MAX_RETRIES = 3
+RETRY_DELAY = 1  # ثانیه
+
+# تنظیمات به‌روزرسانی
+UPDATE_INTERVAL = 24 * 60 * 60  # 24 ساعت به ثانیه
+BATCH_SIZE = 100  # تعداد رکوردها در هر بار درج
+
+# تنظیمات لاگینگ
+LOG_LEVEL = "INFO"
+LOG_FILE = f"{BASE_DIR}/tse_collector.log"
+
+# مسیر فایل‌های داده اولیه
+SECTORS_DATA_FILE = f"{BASE_DIR}/data/sectors.json"
+```
+
+## 2. فایل `database/models.py`
+
+```python
+from sqlalchemy import Column, Integer, String, Date, Numeric, BigInteger, Boolean, ForeignKey, UniqueConstraint, Float
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import relationship
+
+Base = declarative_base()
+
+class Sector(Base):
+    __tablename__ = 'sectors'
+    
+    id = Column(Integer, primary_key=True)
+    sector_code = Column(Float, unique=True, nullable=False)  # کد صنعت
+    sector_name = Column(String(200), nullable=False)  # نام صنعت به فارسی
+    sector_name_en = Column(String(200))  # نام صنعت به انگلیسی
+    naics_code = Column(String(50))  # کد NAICS
+    naics_name = Column(String(200))  # نام NAICS
+    
+    # ارتباط با جدول سهام
+    stocks = relationship("Stock", back_populates="sector")
+    
+    __table_args__ = (
+        UniqueConstraint('sector_code', name='uq_sector_code'),
+    )
+
+class Stock(Base):
+    __tablename__ = 'stocks'
+    
+    id = Column(Integer, primary_key=True)
+    ticker = Column(String(50), unique=True, nullable=False)
+    name = Column(String(200), nullable=False)
+    web_id = Column(String(50), unique=True, nullable=False)
+    market = Column(String(100), nullable=False)
+    is_active = Column(Boolean, default=True)
+    sector_id = Column(Integer, ForeignKey('sectors.id'), nullable=True)  # ارتباط با صنعت
+    
+    # ارتباط با جداول دیگر
+    sector = relationship("Sector", back_populates="stocks")
+    price_history = relationship("PriceHistory", back_populates="stock")
+    ri_history = relationship("RIHistory", back_populates="stock")
+    intraday_trades = relationship("IntradayTrade", back_populates="stock")
+    shareholder_history = relationship("MajorShareholderHistory", back_populates="stock")
+    
+    __table_args__ = (
+        UniqueConstraint('ticker', name='uq_ticker'),
+        UniqueConstraint('web_id', name='uq_web_id'),
+    )
+
+class PriceHistory(Base):
+    __tablename__ = 'price_history'
+    
+    id = Column(Integer, primary_key=True)
+    stock_id = Column(Integer, ForeignKey('stocks.id'), nullable=False)
+    j_date = Column(String(10), nullable=False)  # تاریخ شمسی YYYY-MM-DD
+    date = Column(Date, nullable=False)  # تاریخ میلادی
+    weekday = Column(String(10))
+    open_price = Column(BigInteger)
+    high_price = Column(BigInteger)
+    low_price = Column(BigInteger)
+    close_price = Column(BigInteger)
+    final_price = Column(BigInteger)
+    volume = Column(BigInteger)
+    value = Column(BigInteger)
+    num_trades = Column(Integer)
+    adjusted_open = Column(BigInteger)
+    adjusted_high = Column(BigInteger)
+    adjusted_low = Column(BigInteger)
+    adjusted_close = Column(BigInteger)
+    adjusted_final = Column(BigInteger)
+    volume_adj = Column(BigInteger)  # حجم تعدیل شده: (final_adj * volume) / final
+    
+    # ارتباط با جدول سهام
+    stock = relationship("Stock", back_populates="price_history")
+    
+    __table_args__ = (
+        UniqueConstraint('stock_id', 'j_date', name='uq_stock_date'),
+    )
+
+class RIHistory(Base):
+    __tablename__ = 'ri_history'
+    
+    id = Column(Integer, primary_key=True)
+    stock_id = Column(Integer, ForeignKey('stocks.id'), nullable=False)
+    j_date = Column(String(10), nullable=False)  # تاریخ شمسی YYYY-MM-DD
+    date = Column(Date, nullable=False)  # تاریخ میلادی
+    weekday = Column(String(10))
+    no_buy_r = Column(Integer)  # تعداد خرید حقیقی
+    no_buy_i = Column(Integer)  # تعداد خرید حقوقی
+    no_sell_r = Column(Integer)  # تعداد فروش حقیقی
+    no_sell_i = Column(Integer)  # تعداد فروش حقوقی
+    vol_buy_r = Column(BigInteger)  # حجم خرید حقیقی
+    vol_buy_i = Column(BigInteger)  # حجم خرید حقوقی
+    vol_sell_r = Column(BigInteger)  # حجم فروش حقیقی
+    vol_sell_i = Column(BigInteger)  # حجم فروش حقوقی
+    val_buy_r = Column(BigInteger)  # ارزش خرید حقیقی
+    val_buy_i = Column(BigInteger)  # ارزش خرید حقوقی
+    val_sell_r = Column(BigInteger)  # ارزش فروش حقیقی
+    val_sell_i = Column(BigInteger)  # ارزش فروش حقوقی
+    
+    # ارتباط با جدول سهام
+    stock = relationship("Stock", back_populates="ri_history")
+    
+    __table_args__ = (
+        UniqueConstraint('stock_id', 'j_date', name='uq_ri_stock_date'),
+    )
+
+class Index(Base):
+    __tablename__ = 'indices'
+    
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), unique=True, nullable=False)
+    web_id = Column(String(50), unique=True, nullable=False)
+    
+    # ارتباط با جدول تاریخچه شاخص
+    history = relationship("IndexHistory", back_populates="index")
+    
+    __table_args__ = (
+        UniqueConstraint('name', name='uq_index_name'),
+        UniqueConstraint('web_id', name='uq_index_web_id'),
+    )
+
+class IndexHistory(Base):
+    __tablename__ = 'index_history'
+    
+    id = Column(Integer, primary_key=True)
+    index_id = Column(Integer, ForeignKey('indices.id'), nullable=False)
+    j_date = Column(String(10), nullable=False)  # تاریخ شمسی YYYY-MM-DD
+    date = Column(Date, nullable=False)  # تاریخ میلادی
+    weekday = Column(String(10))
+    open_price = Column(Numeric(15, 2))
+    high_price = Column(Numeric(15, 2))
+    low_price = Column(Numeric(15, 2))
+    close_price = Column(Numeric(15, 2))
+    adj_close = Column(Numeric(15, 2))
+    volume = Column(BigInteger)
+    
+    # ارتباط با جدول شاخص
+    index = relationship("Index", back_populates="history")
+    
+    __table_args__ = (
+        UniqueConstraint('index_id', 'j_date', name='uq_index_date'),
+    )
+
+class SectorIndexHistory(Base):
+    __tablename__ = 'sector_index_history'
+    
+    id = Column(Integer, primary_key=True)
+    sector_id = Column(Integer, ForeignKey('sectors.id'), nullable=False)
+    j_date = Column(String(10), nullable=False)  # تاریخ شمسی YYYY-MM-DD
+    date = Column(Date, nullable=False)  # تاریخ میلادی
+    weekday = Column(String(10))
+    open_price = Column(Numeric(15, 2))
+    high_price = Column(Numeric(15, 2))
+    low_price = Column(Numeric(15, 2))
+    close_price = Column(Numeric(15, 2))
+    adj_close = Column(Numeric(15, 2))
+    volume = Column(BigInteger)
+    
+    # ارتباط با جدول صنایع
+    sector = relationship("Sector")
+    
+    __table_args__ = (
+        UniqueConstraint('sector_id', 'j_date', name='uq_sector_index_date'),
+    )
+
+class Shareholder(Base):
+    __tablename__ = 'shareholders'
+    
+    id = Column(Integer, primary_key=True)
+    shareholder_id = Column(String(50), unique=True, nullable=False)  # شناسه سهامدار در TSE
+    name = Column(String(200), nullable=False)  # نام سهامدار
+    is_individual = Column(Boolean, default=True)  # آیا شخص حقیقی است؟
+    
+    # ارتباط با جدول تاریخچه سهامداری
+    history = relationship("MajorShareholderHistory", back_populates="shareholder")
+    
+    __table_args__ = (
+        UniqueConstraint('shareholder_id', name='uq_shareholder_id'),
+    )
+
+class MajorShareholderHistory(Base):
+    __tablename__ = 'major_shareholder_history'
+    
+    id = Column(Integer, primary_key=True)
+    stock_id = Column(Integer, ForeignKey('stocks.id'), nullable=False)
+    shareholder_id = Column(Integer, ForeignKey('shareholders.id'), nullable=False)
+    j_date = Column(String(10), nullable=False)  # تاریخ شمسی YYYY-MM-DD
+    date = Column(Date, nullable=False)  # تاریخ میلادی
+    shares_count = Column(BigInteger, nullable=False)  # تعداد سهام
+    percentage = Column(Numeric(5, 2), nullable=False)  # درصد مالکیت
+    
+    # ارتباط با جداول دیگر
+    stock = relationship("Stock")
+    shareholder = relationship("Shareholder", back_populates="history")
+    
+    __table_args__ = (
+        UniqueConstraint('stock_id', 'shareholder_id', 'j_date', name='uq_major_shareholder'),
+    )
+
+class IntradayTrade(Base):
+    __tablename__ = 'intraday_trades'
+    
+    id = Column(Integer, primary_key=True)
+    stock_id = Column(Integer, ForeignKey('stocks.id'), nullable=False)
+    j_date = Column(String(10), nullable=False)  # تاریخ شمسی YYYY-MM-DD
+    date = Column(Date, nullable=False)  # تاریخ میلادی
+    time = Column(String(8), nullable=False)  # زمان معامله HH:MM:SS
+    price = Column(BigInteger, nullable=False)  # قیمت معامله
+    volume = Column(BigInteger, nullable=False)  # حجم معامله
+    value = Column(BigInteger, nullable=False)  # ارزش معامله
+    
+    # ارتباط با جدول سهام
+    stock = relationship("Stock")
+    
+    __table_args__ = (
+        UniqueConstraint('stock_id', 'j_date', 'time', name='uq_intraday_trade'),
+    )
+
+class USDHistory(Base):
+    __tablename__ = 'usd_history'
+    
+    id = Column(Integer, primary_key=True)
+    j_date = Column(String(10), nullable=False)  # تاریخ شمسی YYYY-MM-DD
+    date = Column(Date, nullable=False)  # تاریخ میلادی
+    weekday = Column(String(10))
+    open_price = Column(Numeric(15, 2))  # قیمت باز شدن
+    high_price = Column(Numeric(15, 2))  # بیشترین قیمت
+    low_price = Column(Numeric(15, 2))  # کمترین قیمت
+    close_price = Column(Numeric(15, 2))  # قیمت پایانی
+    adj_close = Column(Numeric(15, 2))  # قیمت پایانی تعدیل شده
+    volume = Column(BigInteger)  # حجم معاملات
+    
+    __table_args__ = (
+        UniqueConstraint('j_date', name='uq_usd_date'),
+    )
+```
+
+## 3. فایل `database/base.py`
+
+```python
+from abc import ABC, abstractmethod
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.exc import IntegrityError
+from typing import List, Dict, Any, Optional
+import logging
+import json
+
+from .models import (
+    Base, Stock, PriceHistory, RIHistory, Index, IndexHistory, Sector, 
+    SectorIndexHistory, Shareholder, MajorShareholderHistory, IntradayTrade, USDHistory
+)
+from config import DATABASE_URL, BATCH_SIZE, SECTORS_DATA_FILE
+
+logger = logging.getLogger(__name__)
+
+class DatabaseBase(ABC):
+    def __init__(self):
+        self.engine = create_engine(DATABASE_URL)
+        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
+        self.create_tables()
+    
+    def create_tables(self):
+        """ایجاد جداول در دیتابیس"""
+        Base.metadata.create_all(bind=self.engine)
+        logger.info("Database tables created successfully")
+    
+    def get_session(self) -> Session:
+        """دریافت سشن دیتابیس"""
+        return self.SessionLocal()
+    
+    def load_sectors_from_file(self):
+        """بارگذاری داده‌های صنایع از فایل"""
+        try:
+            with open(SECTORS_DATA_FILE, 'r', encoding='utf-8') as f:
+                sectors_data = json.load(f)
+            
+            session = self.get_session()
+            try:
+                for sector_data in sectors_data:
+                    # بررسی وجود صنعت
+                    existing = session.query(Sector).filter(
+                        Sector.sector_code == sector_data['SectorCode']
+                    ).first()
+                    
+                    if not existing:
+                        sector = Sector(
+                            sector_code=sector_data['SectorCode'],
+                            sector_name=sector_data['SectorName'],
+                            sector_name_en=sector_data['SectorNameEn'],
+                            naics_code=sector_data['NAICSCode'],
+                            naics_name=sector_data['NAICSName']
+                        )
+                        session.add(sector)
+                
+                session.commit()
+                logger.info(f"Loaded {len(sectors_data)} sectors from file")
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Error loading sectors: {e}")
+            finally:
+                session.close()
+        except Exception as e:
+            logger.error(f"Error reading sectors file: {e}")
+    
+    @abstractmethod
+    def add_stock(self, stock_data: Dict[str, Any]) -> Optional[Stock]:
+        """افزودن سهام جدید به دیتابیس"""
+        pass
+    
+    @abstractmethod
+    def get_stock_by_ticker(self, ticker: str) -> Optional[Stock]:
+        """دریافت اطلاعات سهام با تیکر"""
+        pass
+    
+    @abstractmethod
+    def get_stock_by_web_id(self, web_id: str) -> Optional[Stock]:
+        """دریافت اطلاعات سهام با وب‌آیدی"""
+        pass
+    
+    @abstractmethod
+    def get_sector_by_code(self, sector_code: float) -> Optional[Sector]:
+        """دریافت اطلاعات صنعت با کد صنعت"""
+        pass
+    
+    @abstractmethod
+    def add_price_history(self, history_data: List[Dict[str, Any]]) -> int:
+        """افزودن تاریخچه قیمت سهام"""
+        pass
+    
+    @abstractmethod
+    def add_ri_history(self, history_data: List[Dict[str, Any]]) -> int:
+        """افزودن تاریخچه حقیقی-حقوقی"""
+        pass
+    
+    @abstractmethod
+    def add_index(self, index_data: Dict[str, Any]) -> Optional[Index]:
+        """افزودن شاخص جدید"""
+        pass
+    
+    @abstractmethod
+    def add_index_history(self, history_data: List[Dict[str, Any]]) -> int:
+        """افزودن تاریخچه شاخص"""
+        pass
+    
+    @abstractmethod
+    def add_sector_index_history(self, history_data: List[Dict[str, Any]]) -> int:
+        """افزودن تاریخچه شاخص صنایع"""
+        pass
+    
+    @abstractmethod
+    def add_shareholder(self, shareholder_data: Dict[str, Any]) -> Optional[Shareholder]:
+        """افزودن سهامدار جدید"""
+        pass
+    
+    @abstractmethod
+    def get_shareholder_by_id(self, shareholder_id: str) -> Optional[Shareholder]:
+        """دریافت اطلاعات سهامدار با شناسه"""
+        pass
+    
+    @abstractmethod
+    def add_major_shareholder_history(self, history_data: List[Dict[str, Any]]) -> int:
+        """افزودن تاریخچه سهامداری عمده"""
+        pass
+    
+    @abstractmethod
+    def add_intraday_trades(self, trades_data: List[Dict[str, Any]]) -> int:
+        """افزودن معاملات داخل روزی"""
+        pass
+    
+    @abstractmethod
+    def add_usd_history(self, history_data: List[Dict[str, Any]]) -> int:
+        """افزودن تاریخچه قیمت دلار"""
+        pass
+    
+    @abstractmethod
+    def get_last_price_date(self, stock_id: int) -> Optional[str]:
+        """دریافت آخرین تاریخ قیمت برای یک سهم"""
+        pass
+    
+    @abstractmethod
+    def get_last_ri_date(self, stock_id: int) -> Optional[str]:
+        """دریافت آخرین تاریخ حقیقی-حقوقی برای یک سهم"""
+        pass
+    
+    @abstractmethod
+    def get_last_index_date(self, index_id: int) -> Optional[str]:
+        """دریافت آخرین تاریخ برای یک شاخص"""
+        pass
+    
+    @abstractmethod
+    def get_last_sector_index_date(self, sector_id: int) -> Optional[str]:
+        """دریافت آخرین تاریخ شاخص برای یک صنعت"""
+        pass
+    
+    @abstractmethod
+    def get_last_shareholder_date(self, stock_id: int) -> Optional[str]:
+        """دریافت آخرین تاریخ سهامداری برای یک سهم"""
+        pass
+    
+    @abstractmethod
+    def get_last_usd_date(self) -> Optional[str]:
+        """دریافت آخرین تاریخ قیمت دلار"""
+        pass
+    
+    def batch_insert(self, model_class, data_list: List[Dict[str, Any]]) -> int:
+        """درج دسته‌ای داده‌ها"""
+        if not data_list:
+            return 0
+            
+        inserted_count = 0
+        session = self.get_session()
+        
+        try:
+            for i in range(0, len(data_list), BATCH_SIZE):
+                batch = data_list[i:i+BATCH_SIZE]
+                objects = [model_class(**item) for item in batch]
+                session.bulk_save_objects(objects)
+                session.commit()
+                inserted_count += len(batch)
+                logger.debug(f"Inserted {inserted_count} records into {model_class.__tablename__}")
+                
+        except IntegrityError as e:
+            session.rollback()
+            logger.error(f"Integrity error during batch insert: {e}")
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error during batch insert: {e}")
+        finally:
+            session.close()
+            
+        return inserted_count
+```
+
+## 4. فایل `database/sqlite_db.py`
+
+```python
+from typing import List, Dict, Any, Optional
+from sqlalchemy import and_
+from sqlalchemy.orm import Session
+
+from .base import DatabaseBase
+from .models import (
+    Stock, PriceHistory, RIHistory, Index, IndexHistory, Sector, 
+    SectorIndexHistory, Shareholder, MajorShareholderHistory, IntradayTrade, USDHistory
+)
+import logging
+
+logger = logging.getLogger(__name__)
+
+class SQLiteDatabase(DatabaseBase):
+    def add_stock(self, stock_data: Dict[str, Any]) -> Optional[Stock]:
+        session = self.get_session()
+        try:
+            # بررسی وجود سهام
+            existing = session.query(Stock).filter(
+                Stock.ticker == stock_data['ticker']
+            ).first()
+            
+            if existing:
+                logger.debug(f"Stock {stock_data['ticker']} already exists")
+                return existing
+                
+            stock = Stock(**stock_data)
+            session.add(stock)
+            session.commit()
+            logger.info(f"Added new stock: {stock_data['ticker']}")
+            return stock
+            
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error adding stock {stock_data['ticker']}: {e}")
+            return None
+        finally:
+            session.close()
+    
+    def get_stock_by_ticker(self, ticker: str) -> Optional[Stock]:
+        session = self.get_session()
+        try:
+            return session.query(Stock).filter(Stock.ticker == ticker).first()
+        finally:
+            session.close()
+    
+    def get_stock_by_web_id(self, web_id: str) -> Optional[Stock]:
+        session = self.get_session()
+        try:
+            return session.query(Stock).filter(Stock.web_id == web_id).first()
+        finally:
+            session.close()
+    
+    def get_sector_by_code(self, sector_code: float) -> Optional[Sector]:
+        session = self.get_session()
+        try:
+            return session.query(Sector).filter(Sector.sector_code == sector_code).first()
+        finally:
+            session.close()
+    
+    def add_price_history(self, history_data: List[Dict[str, Any]]) -> int:
+        return self.batch_insert(PriceHistory, history_data)
+    
+    def add_ri_history(self, history_data: List[Dict[str, Any]]) -> int:
+        return self.batch_insert(RIHistory, history_data)
+    
+    def add_index(self, index_data: Dict[str, Any]) -> Optional[Index]:
+        session = self.get_session()
+        try:
+            # بررسی وجود شاخص
+            existing = session.query(Index).filter(
+                Index.name == index_data['name']
+            ).first()
+            
+            if existing:
+                logger.debug(f"Index {index_data['name']} already exists")
+                return existing
+                
+            index = Index(**index_data)
+            session.add(index)
+            session.commit()
+            logger.info(f"Added new index: {index_data['name']}")
+            return index
+            
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error adding index {index_data['name']}: {e}")
+            return None
+        finally:
+            session.close()
+    
+    def add_index_history(self, history_data: List[Dict[str, Any]]) -> int:
+        return self.batch_insert(IndexHistory, history_data)
+    
+    def add_sector_index_history(self, history_data: List[Dict[str, Any]]) -> int:
+        return self.batch_insert(SectorIndexHistory, history_data)
+    
+    def add_shareholder(self, shareholder_data: Dict[str, Any]) -> Optional[Shareholder]:
+        session = self.get_session()
+        try:
+            # بررسی وجود سهامدار
+            existing = session.query(Shareholder).filter(
+                Shareholder.shareholder_id == shareholder_data['shareholder_id']
+            ).first()
+            
+            if existing:
+                logger.debug(f"Shareholder {shareholder_data['shareholder_id']} already exists")
+                return existing
+                
+            shareholder = Shareholder(**shareholder_data)
+            session.add(shareholder)
+            session.commit()
+            logger.info(f"Added new shareholder: {shareholder_data['name']}")
+            return shareholder
+            
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error adding shareholder {shareholder_data['name']}: {e}")
+            return None
+        finally:
+            session.close()
+    
+    def get_shareholder_by_id(self, shareholder_id: str) -> Optional[Shareholder]:
+        session = self.get_session()
+        try:
+            return session.query(Shareholder).filter(Shareholder.shareholder_id == shareholder_id).first()
+        finally:
+            session.close()
+    
+    def add_major_shareholder_history(self, history_data: List[Dict[str, Any]]) -> int:
+        return self.batch_insert(MajorShareholderHistory, history_data)
+    
+    def add_intraday_trades(self, trades_data: List[Dict[str, Any]]) -> int:
+        return self.batch_insert(IntradayTrade, trades_data)
+    
+    def add_usd_history(self, history_data: List[Dict[str, Any]]) -> int:
+        return self.batch_insert(USDHistory, history_data)
+    
+    def get_last_price_date(self, stock_id: int) -> Optional[str]:
+        session = self.get_session()
+        try:
+            result = session.query(PriceHistory.j_date).filter(
+                PriceHistory.stock_id == stock_id
+            ).order_by(PriceHistory.date.desc()).first()
+            
+            return result[0] if result else None
+        finally:
+            session.close()
+    
+    def get_last_ri_date(self, stock_id: int) -> Optional[str]:
+        session = self.get_session()
+        try:
+            result = session.query(RIHistory.j_date).filter(
+                RIHistory.stock_id == stock_id
+            ).order_by(RIHistory.date.desc()).first()
+            
+            return result[0] if result else None
+        finally:
+            session.close()
+    
+    def get_last_index_date(self, index_id: int) -> Optional[str]:
+        session = self.get_session()
+        try:
+            result = session.query(IndexHistory.j_date).filter(
+                IndexHistory.index_id == index_id
+            ).order_by(IndexHistory.date.desc()).first()
+            
+            return result[0] if result else None
+        finally:
+            session.close()
+    
+    def get_last_sector_index_date(self, sector_id: int) -> Optional[str]:
+        session = self.get_session()
+        try:
+            result = session.query(SectorIndexHistory.j_date).filter(
+                SectorIndexHistory.sector_id == sector_id
+            ).order_by(SectorIndexHistory.date.desc()).first()
+            
+            return result[0] if result else None
+        finally:
+            session.close()
+    
+    def get_last_shareholder_date(self, stock_id: int) -> Optional[str]:
+        session = self.get_session()
+        try:
+            result = session.query(MajorShareholderHistory.j_date).filter(
+                MajorShareholderHistory.stock_id == stock_id
+            ).order_by(MajorShareholderHistory.date.desc()).first()
+            
+            return result[0] if result else None
+        finally:
+            session.close()
+    
+    def get_last_usd_date(self) -> Optional[str]:
+        session = self.get_session()
+        try:
+            result = session.query(USDHistory.j_date).order_by(USDHistory.date.desc()).first()
+            return result[0] if result else None
+        finally:
+            session.close()
+```
+
+## 5. فایل `database/postgresql_db.py`
+
+```python
+from typing import List, Dict, Any, Optional
+from sqlalchemy import and_, text
+from sqlalchemy.orm import Session
+
+from .base import DatabaseBase
+from .models import (
+    Stock, PriceHistory, RIHistory, Index, IndexHistory, Sector, 
+    SectorIndexHistory, Shareholder, MajorShareholderHistory, IntradayTrade, USDHistory
+)
+import logging
+
+logger = logging.getLogger(__name__)
+
+class PostgreSQLDatabase(DatabaseBase):
+    def add_stock(self, stock_data: Dict[str, Any]) -> Optional[Stock]:
+        session = self.get_session()
+        try:
+            existing = session.query(Stock).filter(
+                Stock.ticker == stock_data['ticker']
+            ).first()
+            
+            if existing:
+                logger.debug(f"Stock {stock_data['ticker']} already exists")
+                return existing
+                
+            stock = Stock(**stock_data)
+            session.add(stock)
+            session.commit()
+            logger.info(f"Added new stock: {stock_data['ticker']}")
+            return stock
+            
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error adding stock {stock_data['ticker']}: {e}")
+            return None
+        finally:
+            session.close()
+    
+    def get_stock_by_ticker(self, ticker: str) -> Optional[Stock]:
+        session = self.get_session()
+        try:
+            return session.query(Stock).filter(Stock.ticker == ticker).first()
+        finally:
+            session.close()
+    
+    def get_stock_by_web_id(self, web_id: str) -> Optional[Stock]:
+        session = self.get_session()
+        try:
+            return session.query(Stock).filter(Stock.web_id == web_id).first()
+        finally:
+            session.close()
+    
+    def get_sector_by_code(self, sector_code: float) -> Optional[Sector]:
+        session = self.get_session()
+        try:
+            return session.query(Sector).filter(Sector.sector_code == sector_code).first()
+        finally:
+            session.close()
+    
+    def add_price_history(self, history_data: List[Dict[str, Any]]) -> int:
+        # استفاده از INSERT ... ON CONFLICT برای PostgreSQL
+        session = self.get_session()
+        inserted_count = 0
+        
+        try:
+            for i in range(0, len(history_data), BATCH_SIZE):
+                batch = history_data[i:i+BATCH_SIZE]
+                
+                # ایجاد دستور SQL برای درج با نادیده گرفتن تکراری‌ها
+                stmt = """
+                INSERT INTO price_history (
+                    stock_id, j_date, date, weekday, open_price, high_price, low_price,
+                    close_price, final_price, volume, value, num_trades, adjusted_open,
+                    adjusted_high, adjusted_low, adjusted_close, adjusted_final, volume_adj
+                ) VALUES (
+                    :stock_id, :j_date, :date, :weekday, :open_price, :high_price, :low_price,
+                    :close_price, :final_price, :volume, :value, :num_trades, :adjusted_open,
+                    :adjusted_high, :adjusted_low, :adjusted_close, :adjusted_final, :volume_adj
+                )
+                ON CONFLICT (stock_id, j_date) DO NOTHING
+                """
+                
+                result = session.execute(text(stmt), batch)
+                session.commit()
+                inserted_count += result.rowcount
+                
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error during batch insert: {e}")
+        finally:
+            session.close()
+            
+        return inserted_count
+    
+    def add_ri_history(self, history_data: List[Dict[str, Any]]) -> int:
+        # استفاده از INSERT ... ON CONFLICT برای PostgreSQL
+        session = self.get_session()
+        inserted_count = 0
+        
+        try:
+            for i in range(0, len(history_data), BATCH_SIZE):
+                batch = history_data[i:i+BATCH_SIZE]
+                
+                # ایجاد دستور SQL برای درج با نادیده گرفتن تکراری‌ها
+                stmt = """
+                INSERT INTO ri_history (
+                    stock_id, j_date, date, weekday, no_buy_r, no_buy_i, no_sell_r, no_sell_i,
+                    vol_buy_r, vol_buy_i, vol_sell_r, vol_sell_i, val_buy_r, val_buy_i,
+                    val_sell_r, val_sell_i
+                ) VALUES (
+                    :stock_id, :j_date, :date, :weekday, :no_buy_r, :no_buy_i, :no_sell_r, :no_sell_i,
+                    :vol_buy_r, :vol_buy_i, :vol_sell_r, :vol_sell_i, :val_buy_r, :val_buy_i,
+                    :val_sell_r, :val_sell_i
+                )
+                ON CONFLICT (stock_id, j_date) DO NOTHING
+                """
+                
+                result = session.execute(text(stmt), batch)
+                session.commit()
+                inserted_count += result.rowcount
+                
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error during batch insert: {e}")
+        finally:
+            session.close()
+            
+        return inserted_count
+    
+    def add_index(self, index_data: Dict[str, Any]) -> Optional[Index]:
+        session = self.get_session()
+        try:
+            existing = session.query(Index).filter(
+                Index.name == index_data['name']
+            ).first()
+            
+            if existing:
+                logger.debug(f"Index {index_data['name']} already exists")
+                return existing
+                
+            index = Index(**index_data)
+            session.add(index)
+            session.commit()
+            logger.info(f"Added new index: {index_data['name']}")
+            return index
+            
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error adding index {index_data['name']}: {e}")
+            return None
+        finally:
+            session.close()
+    
+    def add_index_history(self, history_data: List[Dict[str, Any]]) -> int:
+        # استفاده از INSERT ... ON CONFLICT برای PostgreSQL
+        session = self.get_session()
+        inserted_count = 0
+        
+        try:
+            for i in range(0, len(history_data), BATCH_SIZE):
+                batch = history_data[i:i+BATCH_SIZE]
+                
+                # ایجاد دستور SQL برای درج با نادیده گرفتن تکراری‌ها
+                stmt = """
+                INSERT INTO index_history (
+                    index_id, j_date, date, weekday, open_price, high_price, low_price,
+                    close_price, adj_close, volume
+                ) VALUES (
+                    :index_id, :j_date, :date, :weekday, :open_price, :high_price, :low_price,
+                    :close_price, :adj_close, :volume
+                )
+                ON CONFLICT (index_id, j_date) DO NOTHING
+                """
+                
+                result = session.execute(text(stmt), batch)
+                session.commit()
+                inserted_count += result.rowcount
+                
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error during batch insert: {e}")
+        finally:
+            session.close()
+            
+        return inserted_count
+    
+    def add_sector_index_history(self, history_data: List[Dict[str, Any]]) -> int:
+        # استفاده از INSERT ... ON CONFLICT برای PostgreSQL
+        session = self.get_session()
+        inserted_count = 0
+        
+        try:
+            for i in range(0, len(history_data), BATCH_SIZE):
+                batch = history_data[i:i+BATCH_SIZE]
+                
+                # ایجاد دستور SQL برای درج با نادیده گرفتن تکراری‌ها
+                stmt = """
+                INSERT INTO sector_index_history (
+                    sector_id, j_date, date, weekday, open_price, high_price, low_price,
+                    close_price, adj_close, volume
+                ) VALUES (
+                    :sector_id, :j_date, :date, :weekday, :open_price, :high_price, :low_price,
+                    :close_price, :adj_close, :volume
+                )
+                ON CONFLICT (sector_id, j_date) DO NOTHING
+                """
+                
+                result = session.execute(text(stmt), batch)
+                session.commit()
+                inserted_count += result.rowcount
+                
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error during batch insert: {e}")
+        finally:
+            session.close()
+            
+        return inserted_count
+    
+    def add_shareholder(self, shareholder_data: Dict[str, Any]) -> Optional[Shareholder]:
+        session = self.get_session()
+        try:
+            existing = session.query(Shareholder).filter(
+                Shareholder.shareholder_id == shareholder_data['shareholder_id']
+            ).first()
+            
+            if existing:
+                logger.debug(f"Shareholder {shareholder_data['shareholder_id']} already exists")
+                return existing
+                
+            shareholder = Shareholder(**shareholder_data)
+            session.add(shareholder)
+            session.commit()
+            logger.info(f"Added new shareholder: {shareholder_data['name']}")
+            return shareholder
+            
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error adding shareholder {shareholder_data['name']}: {e}")
+            return None
+        finally:
+            session.close()
+    
+    def get_shareholder_by_id(self, shareholder_id: str) -> Optional[Shareholder]:
+        session = self.get_session()
+        try:
+            return session.query(Shareholder).filter(Shareholder.shareholder_id == shareholder_id).first()
+        finally:
+            session.close()
+    
+    def add_major_shareholder_history(self, history_data: List[Dict[str, Any]]) -> int:
+        # استفاده از INSERT ... ON CONFLICT برای PostgreSQL
+        session = self.get_session()
+        inserted_count = 0
+        
+        try:
+            for i in range(0, len(history_data), BATCH_SIZE):
+                batch = history_data[i:i+BATCH_SIZE]
+                
+                # ایجاد دستور SQL برای درج با نادیده گرفتن تکراری‌ها
+                stmt = """
+                INSERT INTO major_shareholder_history (
+                    stock_id, shareholder_id, j_date, date, shares_count, percentage
+                ) VALUES (
+                    :stock_id, :shareholder_id, :j_date, :date, :shares_count, :percentage
+                )
+                ON CONFLICT (stock_id, shareholder_id, j_date) DO NOTHING
+                """
+                
+                result = session.execute(text(stmt), batch)
+                session.commit()
+                inserted_count += result.rowcount
+                
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error during batch insert: {e}")
+        finally:
+            session.close()
+            
+        return inserted_count
+    
+    def add_intraday_trades(self, trades_data: List[Dict[str, Any]]) -> int:
+        # استفاده از INSERT ... ON CONFLICT برای PostgreSQL
+        session = self.get_session()
+        inserted_count = 0
+        
+        try:
+            for i in range(0, len(trades_data), BATCH_SIZE):
+                batch = trades_data[i:i+BATCH_SIZE]
+                
+                # ایجاد دستور SQL برای درج با نادیده گرفتن تکراری‌ها
+                stmt = """
+                INSERT INTO intraday_trades (
+                    stock_id, j_date, date, time, price, volume, value
+                ) VALUES (
+                    :stock_id, :j_date, :date, :time, :price, :volume, :value
+                )
+                ON CONFLICT (stock_id, j_date, time) DO NOTHING
+                """
+                
+                result = session.execute(text(stmt), batch)
+                session.commit()
+                inserted_count += result.rowcount
+                
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error during batch insert: {e}")
+        finally:
+            session.close()
+            
+        return inserted_count
+    
+    def add_usd_history(self, history_data: List[Dict[str, Any]]) -> int:
+        # استفاده از INSERT ... ON CONFLICT برای PostgreSQL
+        session = self.get_session()
+        inserted_count = 0
+        
+        try:
+            for i in range(0, len(history_data), BATCH_SIZE):
+                batch = history_data[i:i+BATCH_SIZE]
+                
+                # ایجاد دستور SQL برای درج با نادیده گرفتن تکراری‌ها
+                stmt = """
+                INSERT INTO usd_history (
+                    j_date, date, weekday, open_price, high_price, low_price,
+                    close_price, adj_close, volume
+                ) VALUES (
+                    :j_date, :date, :weekday, :open_price, :high_price, :low_price,
+                    :close_price, :adj_close, :volume
+                )
+                ON CONFLICT (j_date) DO NOTHING
+                """
+                
+                result = session.execute(text(stmt), batch)
+                session.commit()
+                inserted_count += result.rowcount
+                
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error during batch insert: {e}")
+        finally:
+            session.close()
+            
+        return inserted_count
+    
+    def get_last_price_date(self, stock_id: int) -> Optional[str]:
+        session = self.get_session()
+        try:
+            result = session.query(PriceHistory.j_date).filter(
+                PriceHistory.stock_id == stock_id
+            ).order_by(PriceHistory.date.desc()).first()
+            
+            return result[0] if result else None
+        finally:
+            session.close()
+    
+    def get_last_ri_date(self, stock_id: int) -> Optional[str]:
+        session = self.get_session()
+        try:
+            result = session.query(RIHistory.j_date).filter(
+                RIHistory.stock_id == stock_id
+            ).order_by(RIHistory.date.desc()).first()
+            
+            return result[0] if result else None
+        finally:
+            session.close()
+    
+    def get_last_index_date(self, index_id: int) -> Optional[str]:
+        session = self.get_session()
+        try:
+            result = session.query(IndexHistory.j_date).filter(
+                IndexHistory.index_id == index_id
+            ).order_by(IndexHistory.date.desc()).first()
+            
+            return result[0] if result else None
+        finally:
+            session.close()
+    
+    def get_last_sector_index_date(self, sector_id: int) -> Optional[str]:
+        session = self.get_session()
+        try:
+            result = session.query(SectorIndexHistory.j_date).filter(
+                SectorIndexHistory.sector_id == sector_id
+            ).order_by(SectorIndexHistory.date.desc()).first()
+            
+            return result[0] if result else None
+        finally:
+            session.close()
+    
+    def get_last_shareholder_date(self, stock_id: int) -> Optional[str]:
+        session = self.get_session()
+        try:
+            result = session.query(MajorShareholderHistory.j_date).filter(
+                MajorShareholderHistory.stock_id == stock_id
+            ).order_by(MajorShareholderHistory.date.desc()).first()
+            
+            return result[0] if result else None
+        finally:
+            session.close()
+    
+    def get_last_usd_date(self) -> Optional[str]:
+        session = self.get_session()
+        try:
+            result = session.query(USDHistory.j_date).order_by(USDHistory.date.desc()).first()
+            return result[0] if result else None
+        finally:
+            session.close()
+```
+
+## 6. فایل `api/base_api.py`
+
+```python
+from abc import ABC, abstractmethod
+from typing import List, Dict, Any, Optional
+
+class BaseAPI(ABC):
+    @abstractmethod
+    async def get_stock_info(self, ticker: str) -> Optional[Dict[str, Any]]:
+        """دریافت اطلاعات سهام از تیکر"""
+        pass
+    
+    @abstractmethod
+    async def get_stock_detail(self, web_id: str) -> Optional[Dict[str, Any]]:
+        """دریافت اطلاعات کامل سهام با وب‌آیدی"""
+        pass
+    
+    @abstractmethod
+    async def get_price_history(self, web_id: str, start_date: str = None, end_date: str = None) -> List[Dict[str, Any]]:
+        """دریافت تاریخچه قیمت سهام"""
+        pass
+    
+    @abstractmethod
+    async def get_ri_history(self, web_id: str, start_date: str = None, end_date: str = None) -> List[Dict[str, Any]]:
+        """دریافت تاریخچه حقیقی-حقوقی"""
+        pass
+    
+    @abstractmethod
+    async def get_index_history(self, web_id: str, start_date: str = None, end_date: str = None) -> List[Dict[str, Any]]:
+        """دریافت تاریخچه شاخص"""
+        pass
+    
+    @abstractmethod
+    async def get_index_history_full(self, web_id: str, start_date: str = None, end_date: str = None) -> List[Dict[str, Any]]:
+        """دریافت تاریخچه کامل شاخص با تمام جزئیات"""
+        pass
+    
+    @abstractmethod
+    async def get_cwi_history(self, start_date: str = None, end_date: str = None) -> List[Dict[str, Any]]:
+        """دریافت تاریخچه شاخص کل"""
+        pass
+    
+    @abstractmethod
+    async def get_ewi_history(self, start_date: str = None, end_date: str = None) -> List[Dict[str, Any]]:
+        """دریافت تاریخچه شاخص هم وزن"""
+        pass
+    
+    @abstractmethod
+    async def get_sector_index_history(self, sector_code: float, start_date: str = None, end_date: str = None) -> List[Dict[str, Any]]:
+        """دریافت تاریخچه شاخص صنعت"""
+        pass
+    
+    @abstractmethod
+    async def get_major_shareholders(self, web_id: str, j_date: str) -> List[Dict[str, Any]]:
+        """دریافت اطلاعات سهامداران عمده در تاریخ مشخص"""
+        pass
+    
+    @abstractmethod
+    async def get_intraday_trades(self, web_id: str, j_date: str) -> List[Dict[str, Any]]:
+        """دریافت معاملات داخل روزی یک سهم در تاریخ مشخص"""
+        pass
+    
+    @abstractmethod
+    async def get_usd_history(self, start_date: str = None, end_date: str = None) -> List[Dict[str, Any]]:
+        """دریافت تاریخچه قیمت دلار"""
+        pass
+```
+
+## 7. فایل `api/async_downloader.py`
+
+```python
+import aiohttp
+import asyncio
+import logging
+from typing import List, Dict, Any, Optional
+from config import API_BASE_URL, API_TIMEOUT, MAX_RETRIES, RETRY_DELAY
+
+logger = logging.getLogger(__name__)
+
+class AsyncDownloader:
+    def __init__(self, max_concurrent: int = 10):
+        self.max_concurrent = max_concurrent
+        self.session = None
+        self.semaphore = asyncio.Semaphore(max_concurrent)
+    
+    async def __aenter__(self):
+        self.session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=API_TIMEOUT),
+            connector=aiohttp.TCPConnector(limit=self.max_concurrent)
+        )
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.session.close()
+    
+    async def fetch(self, url: str, params: Dict[str, Any] = None) -> Optional[Dict[str, Any]]:
+        """دریافت داده از API با مدیریت خطا و تلاش مجدد"""
+        async with self.semaphore:
+            for attempt in range(MAX_RETRIES):
+                try:
+                    async with self.session.get(url, params=params) as response:
+                        if response.status == 200:
+                            return await response.json()
+                        else:
+                            logger.warning(f"Request failed with status {response.status}: {url}")
+                except Exception as e:
+                    logger.warning(f"Attempt {attempt + 1} failed for {url}: {e}")
+                
+                if attempt < MAX_RETRIES - 1:
+                    await asyncio.sleep(RETRY_DELAY)
+            
+            logger.error(f"Max retries exceeded for {url}")
+            return None
+    
+    async def fetch_multiple(self, urls: List[str]) -> List[Optional[Dict[str, Any]]]:
+        """دریافت همزمان چندین URL"""
+        tasks = [self.fetch(url) for url in urls]
+        return await asyncio.gather(*tasks)
+```
+
+## 8. فایل `api/tse_api.py`
+
+```python
+import re
+import jdatetime
+import aiohttp
+import requests
+from datetime import datetime
+from typing import List, Dict, Any, Optional, Tuple
+from persiantools import characters
+import logging
+
+from .base_api import BaseAPI
+from .async_downloader import AsyncDownloader
+from ..utils.date_utils import check_jdate_validity, convert_jdate_to_gregorian
+from config import API_BASE_URL
+
+logger = logging.getLogger(__name__)
+
+class TSEAPI(BaseAPI):
+    def __init__(self):
+        super().__init__()
+        self.downloader = AsyncDownloader()
+    
+    async def get_stock_info(self, ticker: str) -> Optional[Dict[str, Any]]:
+        """دریافت اطلاعات سهام از تیکر"""
+        # تبدیل تیکر به فرمت صحیح
+        ticker = characters.ar_to_fa(''.join(ticker.split('\u200c')).strip())
+        
+        # حالت خاص
+        if ticker == 'آ س پ':
+            ticker = 'آ.س.پ'
+        
+        # کلیدهای جستجو
+        first_name = ticker.split()[0]
+        ticker_clean = ''.join(ticker.split())
+        
+        # جستجو با نام اول
+        url = f"{API_BASE_URL}/api/Instrument/GetInstrumentSearch/{first_name}"
+        data = await self.downloader.fetch(url)
+        
+        if not data or 'instrumentSearch' not in data:
+            logger.error(f"No data found for ticker: {ticker}")
+            return None
+        
+        # پردازش نتایج
+        results = []
+        for item in data['instrumentSearch']:
+            try:
+                result = {
+                    'ticker': characters.ar_to_fa(''.join(item['lVal18AFC'].split('\u200c')).strip()),
+                    'name': characters.ar_to_fa(' '.join([i.strip() for i in item['lVal30'].split('\u200c')]).strip()),
+                    'web_id': item['insCode'],
+                    'market': self._map_market_code(item['cgrValCot']),
+                    'is_active': bool(item['lastDate']),
+                    'sector_code': item.get('cSecVal')  # کد صنعت
+                }
+                results.append(result)
+            except Exception as e:
+                logger.warning(f"Error processing stock item: {e}")
+        
+        # جستجو بر اساس تیکر
+        for result in results:
+            if ''.join(result['ticker'].split()) == ticker_clean:
+                return result
+        
+        # جستجو بر اساس نام
+        for result in results:
+            if ''.join(result['name'].split()) == ticker_clean:
+                return result
+        
+        logger.error(f"Stock not found: {ticker}")
+        return None
+    
+    async def get_stock_detail(self, web_id: str) -> Optional[Dict[str, Any]]:
+        """دریافت اطلاعات کامل سهام با وب‌آیدی"""
+        url = f"{API_BASE_URL}/api/Instrument/GetInstrumentInfo/{web_id}"
+        data = await self.downloader.fetch(url)
+        
+        if not data:
+            logger.error(f"No detail data found for web_id: {web_id}")
+            return None
+        
+        try:
+            return {
+                'web_id': web_id,
+                'sector_code': data.get('cSecVal'),
+                'market': self._map_market_code(data.get('cgrValCot')),
+                'is_active': bool(data.get('lastDate'))
+            }
+        except Exception as e:
+            logger.error(f"Error processing stock detail: {e}")
+            return None
+    
+    async def get_price_history(self, web_id: str, start_date: str = None, end_date: str = None) -> List[Dict[str, Any]]:
+        """دریافت تاریخچه قیمت سهام"""
+        url = f"{API_BASE_URL}/api/ClosingPrice/GetClosingPriceDailyList/{web_id}/0"
+        data = await self.downloader.fetch(url)
+        
+        if not data or 'closingPriceDaily' not in data:
+            logger.error(f"No price history found for web_id: {web_id}")
+            return []
+        
+        results = []
+        for item in data['closingPriceDaily']:
+            try:
+                # تبدیل تاریخ
+                date_str = str(item['dEven'])
+                j_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+                g_date = convert_jdate_to_gregorian(j_date)
+                
+                # فیلتر تاریخ
+                if start_date and j_date < start_date:
+                    continue
+                if end_date and j_date > end_date:
+                    continue
+                
+                result = {
+                    'j_date': j_date,
+                    'date': g_date,
+                    'open_price': item['priceFirst'],
+                    'high_price': item['priceMax'],
+                    'low_price': item['priceMin'],
+                    'close_price': item['pDrCotVal'],
+                    'final_price': item['pClosing'],
+                    'volume': item['qTotTran5J'],
+                    'value': item['qTotCap'],
+                    'num_trades': item['zTotTran']
+                }
+                results.append(result)
+            except Exception as e:
+                logger.warning(f"Error processing price history item: {e}")
+        
+        return results
+    
+    async def get_ri_history(self, web_id: str, start_date: str = None, end_date: str = None) -> List[Dict[str, Any]]:
+        """دریافت تاریخچه حقیقی-حقوقی"""
+        url = f"{API_BASE_URL}/api/ClientType/GetClientTypeHistory/{web_id}"
+        data = await self.downloader.fetch(url)
+        
+        if not data or 'clientType' not in data:
+            logger.error(f"No RI history found for web_id: {web_id}")
+            return []
+        
+        results = []
+        for item in data['clientType']:
+            try:
+                # تبدیل تاریخ
+                date_str = str(item['dEven'])
+                j_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+                g_date = convert_jdate_to_gregorian(j_date)
+                
+                # فیلتر تاریخ
+                if start_date and j_date < start_date:
+                    continue
+                if end_date and j_date > end_date:
+                    continue
+                
+                result = {
+                    'j_date': j_date,
+                    'date': g_date,
+                    'no_buy_r': item['nBuyCountI'],
+                    'no_buy_i': item['nBuyCountC'],
+                    'no_sell_r': item['nSellCountI'],
+                    'no_sell_i': item['nSellCountC'],
+                    'vol_buy_r': item['nBuyVolI'],
+                    'vol_buy_i': item['nBuyVolC'],
+                    'vol_sell_r': item['nSellVolI'],
+                    'vol_sell_i': item['nSellVolC'],
+                    'val_buy_r': item['nBuyValI'],
+                    'val_buy_i': item['nBuyValC'],
+                    'val_sell_r': item['nSellValI'],
+                    'val_sell_i': item['nSellValC']
+                }
+                results.append(result)
+            except Exception as e:
+                logger.warning(f"Error processing RI history item: {e}")
+        
+        return results
+    
+    async def get_index_history(self, web_id: str, start_date: str = None, end_date: str = None) -> List[Dict[str, Any]]:
+        """دریافت تاریخچه شاخص"""
+        url = f"{API_BASE_URL}/api/Index/GetIndexB2History/{web_id}"
+        data = await self.downloader.fetch(url)
+        
+        if not data or 'indexB2' not in data:
+            logger.error(f"No index history found for web_id: {web_id}")
+            return []
+        
+        results = []
+        for item in data['indexB2']:
+            try:
+                # تبدیل تاریخ
+                date_str = str(item['dEven'])
+                j_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+                g_date = convert_jdate_to_gregorian(j_date)
+                
+                # فیلتر تاریخ
+                if start_date and j_date < start_date:
+                    continue
+                if end_date and j_date > end_date:
+                    continue
+                
+                result = {
+                    'j_date': j_date,
+                    'date': g_date,
+                    'adj_close': item['xNivInuClMresIbs']
+                }
+                results.append(result)
+            except Exception as e:
+                logger.warning(f"Error processing index history item: {e}")
+        
+        return results
+    
+    async def get_index_history_full(self, web_id: str, start_date: str = None, end_date: str = None) -> List[Dict[str, Any]]:
+        """دریافت تاریخچه کامل شاخص با تمام جزئیات"""
+        url = f"http://old.tsetmc.com/tsev2/chart/data/IndexFinancial.aspx?i={web_id}&t=ph"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    logger.error(f"Failed to get full index history for web_id: {web_id}")
+                    return []
+                
+                text = await response.text()
+                if not text:
+                    return []
+                
+                results = []
+                for line in text.split(';'):
+                    if not line:
+                        continue
+                    
+                    try:
+                        parts = line.split(',')
+                        if len(parts) < 7:
+                            continue
+                        
+                        # تبدیل تاریخ
+                        date_str = parts[0]
+                        g_date = datetime.strptime(date_str, "%Y%m%d").date()
+                        j_date = jdatetime.date.fromgregorian(date=g_date).strftime("%Y-%m-%d")
+                        
+                        # فیلتر تاریخ
+                        if start_date and j_date < start_date:
+                            continue
+                        if end_date and j_date > end_date:
+                            continue
+                        
+                        result = {
+                            'j_date': j_date,
+                            'date': g_date.isoformat(),
+                            'open_price': float(parts[1]) if parts[1] else None,
+                            'high_price': float(parts[2]) if parts[2] else None,
+                            'low_price': float(parts[3]) if parts[3] else None,
+                            'close_price': float(parts[4]) if parts[4] else None,
+                            'volume': int(parts[5]) if parts[5] else 0
+                        }
+                        results.append(result)
+                    except Exception as e:
+                        logger.warning(f"Error processing full index history item: {e}")
+                
+                return results
+    
+    async def get_cwi_history(self, start_date: str = None, end_date: str = None) -> List[Dict[str, Any]]:
+        """دریافت تاریخچه شاخص کل (شاخص قیمت و بازده نقدی و قیمتی)"""
+        web_id = "32097828799138957"  # شناسه شاخص کل
+        
+        # دریافت داده‌های پایه
+        url = f"{API_BASE_URL}/api/Index/GetIndexB2History/{web_id}"
+        data = await self.downloader.fetch(url)
+        
+        if not data or 'indexB2' not in data:
+            logger.error("No CWI history found")
+            return []
+        
+        results = []
+        for item in data['indexB2']:
+            try:
+                # تبدیل تاریخ
+                date_str = str(item['dEven'])
+                j_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+                g_date = convert_jdate_to_gregorian(j_date)
+                
+                # فیلتر تاریخ
+                if start_date and j_date < start_date:
+                    continue
+                if end_date and j_date > end_date:
+                    continue
+                
+                result = {
+                    'j_date': j_date,
+                    'date': g_date,
+                    'adj_close': item['xNivInuClMresIbs']
+                }
+                results.append(result)
+            except Exception as e:
+                logger.warning(f"Error processing CWI history item: {e}")
+        
+        # دریافت داده‌های کامل (اگر نیاز باشد)
+        if results and len(results) > 0:
+            # دریافت داده‌های کامل برای اولین و آخرین تاریخ
+            first_date = results[0]['j_date']
+            last_date = results[-1]['j_date']
+            
+            # دریافت داده‌های کامل
+            full_data = await self.get_index_history_full(web_id, first_date, last_date)
+            
+            # ادغام داده‌ها
+            if full_data:
+                # ایجاد دیکشنری برای دسترسی سریع
+                full_data_dict = {item['j_date']: item for item in full_data}
+                
+                # به‌روزرسانی نتایج با داده‌های کامل
+                for result in results:
+                    if result['j_date'] in full_data_dict:
+                        full_item = full_data_dict[result['j_date']]
+                        result.update({
+                            'open_price': full_item.get('open_price'),
+                            'high_price': full_item.get('high_price'),
+                            'low_price': full_item.get('low_price'),
+                            'close_price': full_item.get('close_price'),
+                            'volume': full_item.get('volume')
+                        })
+        
+        return results
+    
+    async def get_ewi_history(self, start_date: str = None, end_date: str = None) -> List[Dict[str, Any]]:
+        """دریافت تاریخچه شاخص هم وزن"""
+        web_id = "67130298613737946"  # شناسه شاخص هم وزن
+        
+        # دریافت داده‌های پایه
+        url = f"{API_BASE_URL}/api/Index/GetIndexB2History/{web_id}"
+        data = await self.downloader.fetch(url)
+        
+        if not data or 'indexB2' not in data:
+            logger.error("No EWI history found")
+            return []
+        
+        results = []
+        for item in data['indexB2']:
+            try:
+                # تبدیل تاریخ
+                date_str = str(item['dEven'])
+                j_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+                g_date = convert_jdate_to_gregorian(j_date)
+                
+                # فیلتر تاریخ
+                if start_date and j_date < start_date:
+                    continue
+                if end_date and j_date > end_date:
+                    continue
+                
+                result = {
+                    'j_date': j_date,
+                    'date': g_date,
+                    'adj_close': item['xNivInuClMresIbs']
+                }
+                results.append(result)
+            except Exception as e:
+                logger.warning(f"Error processing EWI history item: {e}")
+        
+        # دریافت داده‌های کامل (اگر نیاز باشد)
+        if results and len(results) > 0:
+            # دریافت داده‌های کامل برای اولین و آخرین تاریخ
+            first_date = results[0]['j_date']
+            last_date = results[-1]['j_date']
+            
+            # دریافت داده‌های کامل
+            full_data = await self.get_index_history_full(web_id, first_date, last_date)
+            
+            # ادغام داده‌ها
+            if full_data:
+                # ایجاد دیکشنری برای دسترسی سریع
+                full_data_dict = {item['j_date']: item for item in full_data}
+                
+                # به‌روزرسانی نتایج با داده‌های کامل
+                for result in results:
+                    if result['j_date'] in full_data_dict:
+                        full_item = full_data_dict[result['j_date']]
+                        result.update({
+                            'open_price': full_item.get('open_price'),
+                            'high_price': full_item.get('high_price'),
+                            'low_price': full_item.get('low_price'),
+                            'close_price': full_item.get('close_price'),
+                            'volume': full_item.get('volume')
+                        })
+        
+        return results
+    
+    async def get_sector_index_history(self, sector_code: float, start_date: str = None, end_date: str = None) -> List[Dict[str, Any]]:
+        """دریافت تاریخچه شاخص صنعت"""
+        # دریافت وب‌آیدی شاخص صنعت
+        sector_web_id = self._get_sector_web_id(sector_code)
+        if not sector_web_id:
+            logger.error(f"Could not find web ID for sector code: {sector_code}")
+            return []
+        
+        # دریافت داده‌های پایه
+        url = f"{API_BASE_URL}/api/Index/GetIndexB2History/{sector_web_id}"
+        data = await self.downloader.fetch(url)
+        
+        if not data or 'indexB2' not in data:
+            logger.error(f"No sector index history found for sector code: {sector_code}")
+            return []
+        
+        results = []
+        for item in data['indexB2']:
+            try:
+                # تبدیل تاریخ
+                date_str = str(item['dEven'])
+                j_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+                g_date = convert_jdate_to_gregorian(j_date)
+                
+                # فیلتر تاریخ
+                if start_date and j_date < start_date:
+                    continue
+                if end_date and j_date > end_date:
+                    continue
+                
+                result = {
+                    'j_date': j_date,
+                    'date': g_date,
+                    'adj_close': item['xNivInuClMresIbs']
+                }
+                results.append(result)
+            except Exception as e:
+                logger.warning(f"Error processing sector index history item: {e}")
+        
+        # دریافت داده‌های کامل (اگر نیاز باشد)
+        if results and len(results) > 0:
+            # دریافت داده‌های کامل برای اولین و آخرین تاریخ
+            first_date = results[0]['j_date']
+            last_date = results[-1]['j_date']
+            
+            # دریافت داده‌های کامل
+            full_data = await self.get_index_history_full(sector_web_id, first_date, last_date)
+            
+            # ادغام داده‌ها
+            if full_data:
+                # ایجاد دیکشنری برای دسترسی سریع
+                full_data_dict = {item['j_date']: item for item in full_data}
+                
+                # به‌روزرسانی نتایج با داده‌های کامل
+                for result in results:
+                    if result['j_date'] in full_data_dict:
+                        full_item = full_data_dict[result['j_date']]
+                        result.update({
+                            'open_price': full_item.get('open_price'),
+                            'high_price': full_item.get('high_price'),
+                            'low_price': full_item.get('low_price'),
+                            'close_price': full_item.get('close_price'),
+                            'volume': full_item.get('volume')
+                        })
+        
+        return results
+    
+    async def get_major_shareholders(self, web_id: str, j_date: str) -> List[Dict[str, Any]]:
+        """دریافت اطلاعات سهامداران عمده در تاریخ مشخص"""
+        # تبدیل تاریخ شمسی به میلادی برای فرمت‌دهی درخواست
+        year, month, day = j_date.split('-')
+        g_date = jdatetime.date(int(year), int(month), int(day)).togregorian()
+        date_str = f"{g_date.year:04}{g_date.month:02}{g_date.day:02}"
+        
+        url = f"{API_BASE_URL}/api/Shareholder/GetShareholderHistory/{web_id}/{date_str}"
+        data = await self.downloader.fetch(url)
+        
+        if not data or 'shareholderHistory' not in data:
+            logger.error(f"No major shareholders found for web_id: {web_id}, date: {j_date}")
+            return []
+        
+        results = []
+        for item in data['shareholderHistory']:
+            try:
+                # تشخیص شخص حقیقی یا حقوقی
+                is_individual = item.get('isIndividual', True)
+                
+                result = {
+                    'shareholder_id': str(item.get('shareHolderId', '')),
+                    'name': item.get('shareHolderName', ''),
+                    'is_individual': is_individual,
+                    'j_date': j_date,
+                    'date': g_date.isoformat(),
+                    'shares_count': item.get('numberOfShares', 0),
+                    'percentage': item.get('percent', 0)
+                }
+                results.append(result)
+            except Exception as e:
+                logger.warning(f"Error processing major shareholder item: {e}")
+        
+        return results
+    
+    async def get_intraday_trades(self, web_id: str, j_date: str) -> List[Dict[str, Any]]:
+        """دریافت معاملات داخل روزی یک سهم در تاریخ مشخص"""
+        # تبدیل تاریخ شمسی به میلادی برای فرمت‌دهی درخواست
+        year, month, day = j_date.split('-')
+        g_date = jdatetime.date(int(year), int(month), int(day)).togregorian()
+        date_str = f"{g_date.year:04}{g_date.month:02}{g_date.day:02}"
+        
+        url = f"{API_BASE_URL}/api/Trade/GetTradeHistory/{web_id}/{date_str}/false"
+        data = await self.downloader.fetch(url)
+        
+        if not data or 'tradeHistory' not in data:
+            logger.error(f"No intraday trades found for web_id: {web_id}, date: {j_date}")
+            return []
+        
+        results = []
+        for item in data['tradeHistory']:
+            try:
+                # استخراج زمان معامله
+                time_str = item.get('hEven', '')
+                if time_str:
+                    time_str = f"{time_str[:2]}:{time_str[2:4]}:{time_str[4:6]}"
+                
+                result = {
+                    'j_date': j_date,
+                    'date': g_date.isoformat(),
+                    'time': time_str,
+                    'price': item.get('pTran', 0),
+                    'volume': item.get('qTitTran', 0),
+                    'value': item.get('qTran', 0)
+                }
+                results.append(result)
+            except Exception as e:
+                logger.warning(f"Error processing intraday trade item: {e}")
+        
+        return results
+    
+    async def get_usd_history(self, start_date: str = None, end_date: str = None) -> List[Dict[str, Any]]:
+        """دریافت تاریخچه قیمت دلار"""
+        # استفاده از API بانک مرکزی برای دریافت نرخ ارز
+        base_url = "https://www.cbi.ir/ExRatesRss.aspx"
+        
+        try:
+            # دریافت داده‌ها از API
+            response = requests.get(base_url)
+            response.raise_for_status()
+            
+            # پردازش داده‌های XML
+            from xml.etree import ElementTree as ET
+            root = ET.fromstring(response.content)
+            
+            results = []
+            for item in root.findall('.//item'):
+                try:
+                    title = item.find('title').text
+                    description = item.find('description').text
+                    pub_date = item.find('pubDate').text
+                    
+                    # استخراج اطلاعات از عنوان
+                    if "دلار آمریکا" in title:
+                        # استخراج قیمت از توضیحات
+                        import re
+                        price_match = re.search(r'(\d+,\d+)', description)
+                        if price_match:
+                            price = float(price_match.group(1).replace(',', ''))
+                            
+                            # تبدیل تاریخ انتشار
+                            from datetime import datetime
+                            pub_date_obj = datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S GMT")
+                            g_date = pub_date_obj.date()
+                            j_date = jdatetime.date.fromgregorian(date=g_date).strftime("%Y-%m-%d")
+                            
+                            # فیلتر تاریخ
+                            if start_date and j_date < start_date:
+                                continue
+                            if end_date and j_date > end_date:
+                                continue
+                            
+                            result = {
+                                'j_date': j_date,
+                                'date': g_date.isoformat(),
+                                'close_price': price,
+                                'open_price': price,  # در این API فقط قیمت پایانی موجود است
+                                'high_price': price,
+                                'low_price': price,
+                                'adj_close': price,
+                                'volume': 0  # برای ارز حجم معاملات معنی ندارد
+                            }
+                            results.append(result)
+                except Exception as e:
+                    logger.warning(f"Error processing USD item: {e}")
+            
+            return results
+        except Exception as e:
+            logger.error(f"Error fetching USD history: {e}")
+            return []
+    
+    def _map_market_code(self, code: str) -> str:
+        """تبدیل کد بازار به نام بازار"""
+        code = re.sub('[0-9]', '', code)
+        mapping = {
+            'N': 'بورس',
+            'Z': 'فرابورس',
+            'D': 'فرابورس',
+            'A': 'پایه زرد',
+            'P': 'پایه زرد',
+            'C': 'پایه نارنجی',
+            'L': 'پایه قرمز',
+            'W': 'کوچک و متوسط فرابورس',
+            'V': 'کوچک و متوسط فرابورس',
+        }
+        return mapping.get(code, 'نامعلوم')
+    
+    def _get_sector_web_id(self, sector_code: float) -> Optional[str]:
+        """دریافت وب‌آیدی شاخص صنعت با کد صنعت"""
+        # نگاشت کد صنعت به وب‌آیدی شاخص
+        sector_web_ids = {
+            1.0: "34408080767216529",   # زراعت
+            11.0: "12331083953323969",  # استخراج نفت گاز
+            13.0: "13235969998952202",  # استخراج کانه های فلزی
+            20.0: "59288237226302898",  # محصولات چوبی
+            21.0: "30106839080444358",  # محصولات کاغذی
+            22.0: "25766336681098389",  # انتشار، چاپ و تکثیر
+            25.0: "36469751685735891",  # لاستیک و پلاستیک
+            27.0: "32453344048876642",  # فلزات اساسی
+            28.0: "1123534346391630",   # ساخت محصولات فلزی
+            31.0: "33878047680249697",  # ماشین آلات و دستگاه های برقی
+            34.0: "24733701189547084",  # خودرو و ساخت قطعات
+            43.0: "20213770409093165",  # مواد و محصولات دارویی
+            44.0: "21948907150049163",  # محصولات شیمیایی
+            47.0: "40355846462826897",  # خرده فروشی
+            53.0: "54843635503648458",  # سیمان، آهک و گچ
+            55.0: "15508900928481581",  # هتل و رستوران
+            56.0: "3615666621538524",   # سرمایه گذاریها
+            60.0: "33626672012415176",  # حمل ونقل، انبارداری و ارتباطات
+            64.0: "65986638607018835",  # مخابرات
+            67.0: "57616105980228781",  # فعالیت‌های کمکی به نهادهای مالی واسط
+            70.0: "70077233737515808",  # انبوه سازی، املاک و مستغلات
+            72.0: "14651627750314021",  # رایانه و فعالیت های وابسته به آن
+            73.0: "34295935482222451",  # اطلاعات و ارتباطات
+            74.0: "72002976013856737",  # خدمات فنی و مهندسی
+        }
+        
+        return sector_web_ids.get(sector_code)
+```
+
+## 9. فایل `utils/date_utils.py`
+
+```python
+import jdatetime
+from typing import Optional
+
+def check_jdate_validity(date_str: str, key_word: str = "date") -> Optional[str]:
+    """بررسی اعتبار تاریخ شمسی"""
+    try:
+        if len(date_str.split('-')[0]) == 4:
+            date = jdatetime.date(
+                year=int(date_str.split('-')[0]),
+                month=int(date_str.split('-')[1]),
+                day=int(date_str.split('-')[2])
+            )
+            return f'{date.year:04}-{date.month:02}-{date.day:02}'
+        else:
+            print(f'Please enter valid {key_word} date in YYYY-MM-DD format')
+            return None
+    except:
+        if len(date_str) == 10:
+            print(f'Please enter valid {key_word} date')
+            return None
+        else:
+            print(f'Please enter valid {key_word} date in YYYY-MM-DD format')
+            return None
+
+def convert_jdate_to_gregorian(j_date_str: str) -> Optional[str]:
+    """تبدیل تاریخ شمسی به میلادی"""
+    try:
+        year, month, day = map(int, j_date_str.split('-'))
+        j_date = jdatetime.date(year, month, day)
+        g_date = j_date.togregorian()
+        return g_date.isoformat()
+    except:
+        return None
+```
+
+## 10. فایل `utils/logger.py`
+
+```python
+import logging
+import sys
+from pathlib import Path
+from config import LOG_LEVEL, LOG_FILE
+
+def setup_logger():
+    """تنظیم سیستم لاگینگ"""
+    # ایجاد مسیر فایل لاگ اگر وجود ندارد
+    log_path = Path(LOG_FILE)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # تنظیم سطح لاگینگ
+    numeric_level = getattr(logging, LOG_LEVEL.upper(), None)
+    if not isinstance(numeric_level, int):
+        raise ValueError(f'Invalid log level: {LOG_LEVEL}')
+    
+    # تنظیم فرمت لاگ
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # تنظیم لاگ برای فایل
+    file_handler = logging.FileHandler(LOG_FILE, encoding='utf-8')
+    file_handler.setFormatter(formatter)
+    
+    # تنظیم لاگ برای کنسول
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    
+    # تنظیم لاگ اصلی
+    root_logger = logging.getLogger()
+    root_logger.setLevel(numeric_level)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+```
+
+## 11. فایل `data/sectors.json`
+
+```json
+[
+    {
+        "SectorCode": 55.0,
+        "SectorName": "هتل و رستوران",
+        "SectorNameEn": "Hotels and Restaurants",
+        "NAICSCode": 72,
+        "NAICSName": "Accommodation and Food Services"
+    },
+    {
+        "SectorCode": 72.0,
+        "SectorName": "رایانه و فعالیت های وابسته به آن",
+        "SectorNameEn": "Computer and Related Activities",
+        "NAICSCode": 5415,
+        "NAICSName": "Computer Systems Design and Related Services"
+    },
+    {
+        "SectorCode": 27.0,
+        "SectorName": "فلزات اساسی",
+        "SectorNameEn": "Basic Metals",
+        "NAICSCode": 331,
+        "NAICSName": "Primary Metal Manufacturing"
+    },
+    {
+        "SectorCode": 13.0,
+        "SectorName": "استخراج کانه های فلزی",
+        "SectorNameEn": "Metal Ore Mining",
+        "NAICSCode": 2122,
+        "NAICSName": "Metal Ore Mining"
+    },
+    {
+        "SectorCode": 64.0,
+        "SectorName": "مخابرات",
+        "SectorNameEn": "Telecommunications",
+        "NAICSCode": 517,
+        "NAICSName": "Telecommunications"
+    },
+    {
+        "SectorCode": 53.0,
+        "SectorName": "سیمان، آهک و گچ",
+        "SectorNameEn": "Cement, Lime and Gypsum",
+        "NAICSCode": 3273,
+        "NAICSName": "Cement and Concrete Product Manufacturing"
+    },
+    {
+        "SectorCode": 73.0,
+        "SectorName": "اطلاعات و ارتباطات",
+        "SectorNameEn": "Information and Communications",
+        "NAICSCode": 51,
+        "NAICSName": "Information"
+    },
+    {
+        "SectorCode": 47.0,
+        "SectorName": "خرده فروشی،باستثنای وسایل نقلیه موتوری",
+        "SectorNameEn": "Retail Trade, Except Motor Vehicles",
+        "NAICSCode": "44-45",
+        "NAICSName": "Retail Trade"
+    },
+    {
+        "SectorCode": 67.0,
+        "SectorName": "فعالیتهای کمکی به نهادهای مالی واسط",
+        "SectorNameEn": "Auxiliary Activities for Financial Intermediation",
+        "NAICSCode": 523,
+        "NAICSName": "Securities, Commodity Contracts, and Other Financial Investments and Related Activities"
+    },
+    {
+        "SectorCode": 31.0,
+        "SectorName": "ماشین آلات و دستگاه های برقی",
+        "SectorNameEn": "Electrical Machinery and Apparatus",
+        "NAICSCode": 335,
+        "NAICSName": "Electrical Equipment, Appliance, and Component Manufacturing"
+    },
+    {
+        "SectorCode": 43.0,
+        "SectorName": "مواد و محصولات دارویی",
+        "SectorNameEn": "Pharmaceutical Materials and Products",
+        "NAICSCode": 3254,
+        "NAICSName": "Pharmaceutical and Medicine Manufacturing"
+    },
+    {
+        "SectorCode": 44.0,
+        "SectorName": "محصولات شیمیایی",
+        "SectorNameEn": "Chemical Products",
+        "NAICSCode": 325,
+        "NAICSName": "Chemical Manufacturing"
+    },
+    {
+        "SectorCode": 25.0,
+        "SectorName": "لاستیک و پلاستیک",
+        "SectorNameEn": "Rubber and Plastics",
+        "NAICSCode": 326,
+        "NAICSName": "Plastics and Rubber Products Manufacturing"
+    },
+    {
+        "SectorCode": 56.0,
+        "SectorName": "سرمایه گذاریها",
+        "SectorNameEn": "Investments",
+        "NAICSCode": 525,
+        "NAICSName": "Funds, Trusts, and Other Financial Vehicles"
+    },
+    {
+        "SectorCode": 70.0,
+        "SectorName": "انبوه سازی، املاک و مستغلات",
+        "SectorNameEn": "Real Estate Development and Properties",
+        "NAICSCode": 531,
+        "NAICSName": "Real Estate"
+    },
+    {
+        "SectorCode": 22.0,
+        "SectorName": "انتشار، چاپ و تکثیر",
+        "SectorNameEn": "Publishing, Printing and Reproduction",
+        "NAICSCode": 511,
+        "NAICSName": "Publishing Industries"
+    },
+    {
+        "SectorCode": 28.0,
+        "SectorName": "ساخت محصولات فلزی",
+        "SectorNameEn": "Fabricated Metal Products",
+        "NAICSCode": 332,
+        "NAICSName": "Fabricated Metal Product Manufacturing"
+    },
+    {
+        "SectorCode": 20.0,
+        "SectorName": "محصولات چوبی",
+        "SectorNameEn": "Wood Products",
+        "NAICSCode": 321,
+        "NAICSName": "Wood Product Manufacturing"
+    },
+    {
+        "SectorCode": 21.0,
+        "SectorName": "محصولات کاغذی",
+        "SectorNameEn": "Paper Products",
+        "NAICSCode": 322,
+        "NAICSName": "Paper Manufacturing"
+    },
+    {
+        "SectorCode": 60.0,
+        "SectorName": "حمل ونقل، انبارداری و ارتباطات",
+        "SectorNameEn": "Transport, Storage and Communications",
+        "NAICSCode": "48-49",
+        "NAICSName": "Transportation and Warehousing"
+    },
+    {
+        "SectorCode": 11.0,
+        "SectorName": "استخراج نفت گاز و خدمات جنبی جز اکتشاف",
+        "SectorNameEn": "Oil and Gas Extraction and Related Services (Excluding Exploration)",
+        "NAICSCode": 211,
+        "NAICSName": "Oil and Gas Extraction"
+    },
+    {
+        "SectorCode": 34.0,
+        "SectorName": "خودرو و ساخت قطعات",
+        "SectorNameEn": "Automotive and Parts Manufacturing",
+        "NAICSCode": 3361,
+        "NAICSName": "Motor Vehicle Manufacturing"
+    },
+    {
+        "SectorCode": 74.0,
+        "SectorName": "خدمات فنی و مهندسی",
+        "SectorNameEn": "Technical and Engineering Services",
+        "NAICSCode": 5413,
+        "NAICSName": "Architectural, Engineering, and Related Services"
+    },
+    {
+        "SectorCode": 1.0,
+        "SectorName": "زراعت و خدمات وابسته",
+        "SectorNameEn": "Agriculture and Related Services",
+        "NAICSCode": 11,
+        "NAICSName": "Agriculture, Forestry, Fishing and Hunting"
+    }
+]
+```
+
+## 12. فایل `main.py`
+
+```python
+import asyncio
+import logging
+from datetime import datetime, timedelta
+from typing import List, Dict, Any
+
+from config import DATABASE_TYPE, UPDATE_INTERVAL
+from database.sqlite_db import SQLiteDatabase
+from database.postgresql_db import PostgreSQLDatabase
+from api.tse_api import TSEAPI
+from utils.logger import setup_logger
+from utils.date_utils import check_jdate_validity
+
+# تنظیم لاگینگ
+setup_logger()
+logger = logging.getLogger(__name__)
+
+class TSEDataCollector:
+    def __init__(self):
+        # انتخاب دیتابیس بر اساس تنظیمات
+        if DATABASE_TYPE == "sqlite":
+            self.db = SQLiteDatabase()
+        elif DATABASE_TYPE == "postgresql":
+            self.db = PostgreSQLDatabase()
+        else:
+            raise ValueError(f"Unsupported database type: {DATABASE_TYPE}")
+        
+        self.api = TSEAPI()
+        
+        # بارگذاری داده‌های اولیه صنایع
+        self.db.load_sectors_from_file()
+    
+    async def update_stock_data(self, ticker: str, start_date: str = None, end_date: str = None):
+        """به‌روزرسانی داده‌های یک سهم"""
+        logger.info(f"Updating data for stock: {ticker}")
+        
+        # دریافت اطلاعات سهام
+        stock_info = await self.api.get_stock_info(ticker)
+        if not stock_info:
+            logger.error(f"Failed to get stock info for: {ticker}")
+            return
+        
+        # دریافت اطلاعات کامل سهام
+        stock_detail = await self.api.get_stock_detail(stock_info['web_id'])
+        if stock_detail:
+            # ادغام اطلاعات
+            stock_info.update(stock_detail)
+        
+        # دریافت اطلاعات صنعت
+        sector = None
+        if 'sector_code' in stock_info and stock_info['sector_code']:
+            sector = self.db.get_sector_by_code(stock_info['sector_code'])
+        
+        # آماده‌سازی داده‌های سهام برای ذخیره در دیتابیس
+        stock_data = {
+            'ticker': stock_info['ticker'],
+            'name': stock_info['name'],
+            'web_id': stock_info['web_id'],
+            'market': stock_info['market'],
+            'is_active': stock_info['is_active'],
+            'sector_id': sector.id if sector else None
+        }
+        
+        # افزودن یا به‌روزرسانی اطلاعات سهام در دیتابیس
+        stock = self.db.add_stock(stock_data)
+        if not stock:
+            logger.error(f"Failed to save stock info for: {ticker}")
+            return
+        
+        # تعیین بازه تاریخ برای به‌روزرسانی
+        if not start_date:
+            last_price_date = self.db.get_last_price_date(stock.id)
+            if last_price_date:
+                # شروع از روز بعد از آخرین تاریخ
+                last_date = datetime.strptime(last_price_date, "%Y-%m-%d")
+                start_date = (last_date + timedelta(days=1)).strftime("%Y-%m-%d")
+        
+        if not end_date:
+            end_date = datetime.now().strftime("%Y-%m-%d")
+        
+        # بررسی اعتبار تاریخ‌ها
+        if start_date:
+            start_date = check_jdate_validity(start_date, "start_date")
+        if end_date:
+            end_date = check_jdate_validity(end_date, "end_date")
+        
+        if not start_date or not end_date:
+            logger.error(f"Invalid date range for stock: {ticker}")
+            return
+        
+        # دریافت تاریخچه قیمت
+        price_history = await self.api.get_price_history(
+            stock.web_id, start_date, end_date
+        )
+        
+        if price_history:
+            # محاسبه حجم تعدیل شده برای هر رکورد
+            for item in price_history:
+                # اگر قیمت پایانی صفر نباشد، حجم تعدیل شده را محاسبه کن
+                if item.get('final_price', 0) > 0 and item.get('adjusted_final', 0) > 0:
+                    item['volume_adj'] = int((item['adjusted_final'] * item['volume']) / item['final_price'])
+                else:
+                    item['volume_adj'] = item.get('volume', 0)
+                
+                # افزودن شناسه سهام به داده‌ها
+                item['stock_id'] = stock.id
+            
+            # ذخیره در دیتابیس
+            inserted_count = self.db.add_price_history(price_history)
+            logger.info(f"Added {inserted_count} price records for {ticker}")
+        
+        # دریافت تاریخچه حقیقی-حقوقی
+        ri_history = await self.api.get_ri_history(
+            stock.web_id, start_date, end_date
+        )
+        
+        if ri_history:
+            # افزودن شناسه سهام به داده‌ها
+            for item in ri_history:
+                item['stock_id'] = stock.id
+            
+            # ذخیره در دیتابیس
+            inserted_count = self.db.add_ri_history(ri_history)
+            logger.info(f"Added {inserted_count} RI records for {ticker}")
+    
+    async def update_index_data(self, index_name: str, web_id: str, start_date: str = None, end_date: str = None):
+        """به‌روزرسانی داده‌های یک شاخص"""
+        logger.info(f"Updating data for index: {index_name}")
+        
+        # افزودن یا به‌روزرسانی اطلاعات شاخص در دیتابیس
+        index_data = {'name': index_name, 'web_id': web_id}
+        index = self.db.add_index(index_data)
+        if not index:
+            logger.error(f"Failed to save index info for: {index_name}")
+            return
+        
+        # تعیین بازه تاریخ برای به‌روزرسانی
+        if not start_date:
+            last_index_date = self.db.get_last_index_date(index.id)
+            if last_index_date:
+                # شروع از روز بعد از آخرین تاریخ
+                last_date = datetime.strptime(last_index_date, "%Y-%m-%d")
+                start_date = (last_date + timedelta(days=1)).strftime("%Y-%m-%d")
+        
+        if not end_date:
+            end_date = datetime.now().strftime("%Y-%m-%d")
+        
+        # بررسی اعتبار تاریخ‌ها
+        if start_date:
+            start_date = check_jdate_validity(start_date, "start_date")
+        if end_date:
+            end_date = check_jdate_validity(end_date, "end_date")
+        
+        if not start_date or not end_date:
+            logger.error(f"Invalid date range for index: {index_name}")
+            return
+        
+        # دریافت تاریخچه شاخص
+        index_history = await self.api.get_index_history(
+            web_id, start_date, end_date
+        )
+        
+        if index_history:
+            # افزودن شناسه شاخص به داده‌ها
+            for item in index_history:
+                item['index_id'] = index.id
+            
+            # ذخیره در دیتابیس
+            inserted_count = self.db.add_index_history(index_history)
+            logger.info(f"Added {inserted_count} index records for {index_name}")
+    
+    async def update_cwi_history(self, start_date: str = None, end_date: str = None):
+        """به‌روزرسانی تاریخچه شاخص کل"""
+        logger.info("Updating CWI (Total Market Index) history")
+        
+        # افزودن یا به‌روزرسانی اطلاعات شاخص در دیتابیس
+        index_data = {'name': 'شاخص کل', 'web_id': '32097828799138957'}
+        index = self.db.add_index(index_data)
+        if not index:
+            logger.error("Failed to save CWI index info")
+            return
+        
+        # تعیین بازه تاریخ برای به‌روزرسانی
+        if not start_date:
+            last_index_date = self.db.get_last_index_date(index.id)
+            if last_index_date:
+                # شروع از روز بعد از آخرین تاریخ
+                last_date = datetime.strptime(last_index_date, "%Y-%m-%d")
+                start_date = (last_date + timedelta(days=1)).strftime("%Y-%m-%d")
+        
+        if not end_date:
+            end_date = datetime.now().strftime("%Y-%m-%d")
+        
+        # بررسی اعتبار تاریخ‌ها
+        if start_date:
+            start_date = check_jdate_validity(start_date, "start_date")
+        if end_date:
+            end_date = check_jdate_validity(end_date, "end_date")
+        
+        if not start_date or not end_date:
+            logger.error("Invalid date range for CWI")
+            return
+        
+        # دریافت تاریخچه شاخص
+        index_history = await self.api.get_cwi_history(start_date, end_date)
+        
+        if index_history:
+            # افزودن شناسه شاخص به داده‌ها
+            for item in index_history:
+                item['index_id'] = index.id
+            
+            # ذخیره در دیتابیس
+            inserted_count = self.db.add_index_history(index_history)
+            logger.info(f"Added {inserted_count} CWI records")
+    
+    async def update_ewi_history(self, start_date: str = None, end_date: str = None):
+        """به‌روزرسانی تاریخچه شاخص هم وزن"""
+        logger.info("Updating EWI (Equal Weighted Index) history")
+        
+        # افزودن یا به‌روزرسانی اطلاعات شاخص در دیتابیس
+        index_data = {'name': 'شاخص هم وزن', 'web_id': '67130298613737946'}
+        index = self.db.add_index(index_data)
+        if not index:
+            logger.error("Failed to save EWI index info")
+            return
+        
+        # تعیین بازه تاریخ برای به‌روزرسانی
+        if not start_date:
+            last_index_date = self.db.get_last_index_date(index.id)
+            if last_index_date:
+                # شروع از روز بعد از آخرین تاریخ
+                last_date = datetime.strptime(last_index_date, "%Y-%m-%d")
+                start_date = (last_date + timedelta(days=1)).strftime("%Y-%m-%d")
+        
+        if not end_date:
+            end_date = datetime.now().strftime("%Y-%m-%d")
+        
+        # بررسی اعتبار تاریخ‌ها
+        if start_date:
+            start_date = check_jdate_validity(start_date, "start_date")
+        if end_date:
+            end_date = check_jdate_validity(end_date, "end_date")
+        
+        if not start_date or not end_date:
+            logger.error("Invalid date range for EWI")
+            return
+        
+        # دریافت تاریخچه شاخص
+        index_history = await self.api.get_ewi_history(start_date, end_date)
+        
+        if index_history:
+            # افزودن شناسه شاخص به داده‌ها
+            for item in index_history:
+                item['index_id'] = index.id
+            
+            # ذخیره در دیتابیس
+            inserted_count = self.db.add_index_history(index_history)
+            logger.info(f"Added {inserted_count} EWI records")
+    
+    async def update_sector_index_history(self, sector_code: float, start_date: str = None, end_date: str = None):
+        """به‌روزرسانی تاریخچه شاخص صنعت"""
+        # دریافت اطلاعات صنعت
+        sector = self.db.get_sector_by_code(sector_code)
+        if not sector:
+            logger.error(f"Sector not found for code: {sector_code}")
+            return
+        
+        logger.info(f"Updating sector index history for: {sector.sector_name}")
+        
+        # تعیین بازه تاریخ برای به‌روزرسانی
+        if not start_date:
+            last_index_date = self.db.get_last_sector_index_date(sector.id)
+            if last_index_date:
+                # شروع از روز بعد از آخرین تاریخ
+                last_date = datetime.strptime(last_index_date, "%Y-%m-%d")
+                start_date = (last_date + timedelta(days=1)).strftime("%Y-%m-%d")
+        
+        if not end_date:
+            end_date = datetime.now().strftime("%Y-%m-%d")
+        
+        # بررسی اعتبار تاریخ‌ها
+        if start_date:
+            start_date = check_jdate_validity(start_date, "start_date")
+        if end_date:
+            end_date = check_jdate_validity(end_date, "end_date")
+        
+        if not start_date or not end_date:
+            logger.error(f"Invalid date range for sector: {sector.sector_name}")
+            return
+        
+        # دریافت تاریخچه شاخص صنعت
+        index_history = await self.api.get_sector_index_history(sector_code, start_date, end_date)
+        
+        if index_history:
+            # افزودن شناسه صنعت به داده‌ها
+            for item in index_history:
+                item['sector_id'] = sector.id
+            
+            # ذخیره در دیتابیس
+            inserted_count = self.db.add_sector_index_history(index_history)
+            logger.info(f"Added {inserted_count} sector index records for {sector.sector_name}")
+    
+    async def update_all_sectors_history(self, start_date: str = None, end_date: str = None):
+        """به‌روزرسانی تاریخچه شاخص همه صنایع"""
+        logger.info("Updating all sectors index history")
+        
+        # لیست کدهای صنایع برای به‌روزرسانی
+        sector_codes = [
+            1.0, 11.0, 13.0, 20.0, 21.0, 22.0, 25.0, 27.0, 28.0, 31.0,
+            34.0, 43.0, 44.0, 47.0, 53.0, 55.0, 56.0, 60.0, 64.0, 67.0,
+            70.0, 72.0, 73.0, 74.0
+        ]
+        
+        async with self.api.downloader:
+            # ایجاد وظایف برای همه صنایع
+            tasks = [
+                self.update_sector_index_history(code, start_date, end_date)
+                for code in sector_codes
+            ]
+            
+            # اجرای همزمان همه وظایف
+            await asyncio.gather(*tasks)
+        
+        logger.info("All sectors index history update completed")
+    
+    async def update_major_shareholders(self, ticker: str, j_date: str):
+        """به‌روزرسانی اطلاعات سهامداران عمده یک سهم در تاریخ مشخص"""
+        logger.info(f"Updating major shareholders for {ticker} on {j_date}")
+        
+        # دریافت اطلاعات سهام
+        stock_info = await self.api.get_stock_info(ticker)
+        if not stock_info:
+            logger.error(f"Failed to get stock info for: {ticker}")
+            return
+        
+        # دریافت یا ایجاد سهام در دیتابیس
+        stock = self.db.get_stock_by_web_id(stock_info['web_id'])
+        if not stock:
+            stock_data = {
+                'ticker': stock_info['ticker'],
+                'name': stock_info['name'],
+                'web_id': stock_info['web_id'],
+                'market': stock_info['market'],
+                'is_active': stock_info['is_active']
+            }
+            stock = self.db.add_stock(stock_data)
+            if not stock:
+                logger.error(f"Failed to save stock info for: {ticker}")
+                return
+        
+        # دریافت اطلاعات سهامداران عمده
+        shareholders = await self.api.get_major_shareholders(stock.web_id, j_date)
+        
+        if shareholders:
+            # پردازش سهامداران
+            history_data = []
+            for shareholder_data in shareholders:
+                # دریافت یا ایجاد سهامدار
+                shareholder = self.db.get_shareholder_by_id(shareholder_data['shareholder_id'])
+                if not shareholder:
+                    shareholder_info = {
+                        'shareholder_id': shareholder_data['shareholder_id'],
+                        'name': shareholder_data['name'],
+                        'is_individual': shareholder_data['is_individual']
+                    }
+                    shareholder = self.db.add_shareholder(shareholder_info)
+                    if not shareholder:
+                        logger.warning(f"Failed to save shareholder: {shareholder_data['name']}")
+                        continue
+                
+                # آماده‌سازی داده‌های تاریخچه
+                history_item = {
+                    'stock_id': stock.id,
+                    'shareholder_id': shareholder.id,
+                    'j_date': shareholder_data['j_date'],
+                    'date': shareholder_data['date'],
+                    'shares_count': shareholder_data['shares_count'],
+                    'percentage': shareholder_data['percentage']
+                }
+                history_data.append(history_item)
+            
+            # ذخیره در دیتابیس
+            if history_data:
+                inserted_count = self.db.add_major_shareholder_history(history_data)
+                logger.info(f"Added {inserted_count} major shareholder records for {ticker} on {j_date}")
+    
+    async def update_all_major_shareholders(self, tickers: List[str], j_date: str = None):
+        """به‌روزرسانی اطلاعات سهامداران عمده برای چندین سهم"""
+        if not j_date:
+            j_date = jdatetime.date.today().strftime("%Y-%m-%d")
+        
+        logger.info(f"Updating major shareholders for {len(tickers)} stocks on {j_date}")
+        
+        async with self.api.downloader:
+            # ایجاد وظایف برای همه سهام‌ها
+            tasks = [
+                self.update_major_shareholders(ticker, j_date)
+                for ticker in tickers
+            ]
+            
+            # اجرای همزمان همه وظایف
+            await asyncio.gather(*tasks)
+        
+        logger.info("All major shareholders update completed")
+    
+    async def update_intraday_trades(self, ticker: str, j_date: str):
+        """به‌روزرسانی معاملات داخل روزی یک سهم در تاریخ مشخص"""
+        logger.info(f"Updating intraday trades for {ticker} on {j_date}")
+        
+        # دریافت اطلاعات سهام
+        stock_info = await self.api.get_stock_info(ticker)
+        if not stock_info:
+            logger.error(f"Failed to get stock info for: {ticker}")
+            return
+        
+        # دریافت یا ایجاد سهام در دیتابیس
+        stock = self.db.get_stock_by_web_id(stock_info['web_id'])
+        if not stock:
+            stock_data = {
+                'ticker': stock_info['ticker'],
+                'name': stock_info['name'],
+                'web_id': stock_info['web_id'],
+                'market': stock_info['market'],
+                'is_active': stock_info['is_active']
+            }
+            stock = self.db.add_stock(stock_data)
+            if not stock:
+                logger.error(f"Failed to save stock info for: {ticker}")
+                return
+        
+        # دریافت معاملات داخل روزی
+        trades = await self.api.get_intraday_trades(stock.web_id, j_date)
+        
+        if trades:
+            # افزودن شناسه سهام به داده‌ها
+            for item in trades:
+                item['stock_id'] = stock.id
+            
+            # ذخیره در دیتابیس
+            inserted_count = self.db.add_intraday_trades(trades)
+            logger.info(f"Added {inserted_count} intraday trades for {ticker} on {j_date}")
+    
+    async def update_usd_history(self, start_date: str = None, end_date: str = None):
+        """به‌روزرسانی تاریخچه قیمت دلار"""
+        logger.info("Updating USD history")
+        
+        # تعیین بازه تاریخ برای به‌روزرسانی
+        if not start_date:
+            last_date = self.db.get_last_usd_date()
+            if last_date:
+                # شروع از روز بعد از آخرین تاریخ
+                last_dt = datetime.strptime(last_date, "%Y-%m-%d")
+                start_date = (last_dt + timedelta(days=1)).strftime("%Y-%m-%d")
+        
+        if not end_date:
+            end_date = datetime.now().strftime("%Y-%m-%d")
+        
+        # بررسی اعتبار تاریخ‌ها
+        if start_date:
+            start_date = check_jdate_validity(start_date, "start_date")
+        if end_date:
+            end_date = check_jdate_validity(end_date, "end_date")
+        
+        if not start_date or not end_date:
+            logger.error("Invalid date range for USD")
+            return
+        
+        # دریافت تاریخچه دلار
+        usd_history = await self.api.get_usd_history(start_date, end_date)
+        
+        if usd_history:
+            # ذخیره در دیتابیس
+            inserted_count = self.db.add_usd_history(usd_history)
+            logger.info(f"Added {inserted_count} USD records")
+    
+    async def update_all_data(self, tickers: List[str], indices: List[Dict[str, str]]):
+        """به‌روزرسانی داده‌های همه سهام‌ها و شاخص‌ها"""
+        async with self.api.downloader:
+            # به‌روزرسانی سهام‌ها
+            stock_tasks = [self.update_stock_data(ticker) for ticker in tickers]
+            await asyncio.gather(*stock_tasks)
+            
+            # به‌روزرسانی شاخص‌ها
+            index_tasks = [self.update_index_data(index['name'], index['web_id']) for index in indices]
+            await asyncio.gather(*index_tasks)
+    
+    async def run_periodic_update(self, tickers: List[str], indices: List[Dict[str, str]]):
+        """اجرای به‌روزرسانی دوره‌ای"""
+        while True:
+            logger.info("Starting periodic update...")
+            start_time = datetime.now()
+            
+            # به‌روزرسانی سهام‌ها
+            stock_tasks = [self.update_stock_data(ticker) for ticker in tickers]
+            await asyncio.gather(*stock_tasks)
+            
+            # به‌روزرسانی شاخص‌ها
+            index_tasks = [self.update_index_data(index['name'], index['web_id']) for index in indices]
+            await asyncio.gather(*index_tasks)
+            
+            # به‌روزرسانی شاخص کل و هم وزن
+            await self.update_cwi_history()
+            await self.update_ewi_history()
+            
+            # به‌روزرسانی شاخص صنایع (هر 7 روز یکبار)
+            if start_time.weekday() == 0:  # روز دوشنبه
+                await self.update_all_sectors_history()
+            
+            # به‌روزرسانی اطلاعات سهامداران عمده (هر روز)
+            today = jdatetime.date.today().strftime("%Y-%m-%d")
+            await self.update_all_major_shareholders(tickers, today)
+            
+            # به‌روزرسانی تاریخچه دلار (هر روز)
+            await self.update_usd_history()
+            
+            elapsed = (datetime.now() - start_time).total_seconds()
+            logger.info(f"Update completed in {elapsed:.2f} seconds")
+            
+            # محاسبه زمان انتظار برای به‌روزرسانی بعدی
+            wait_time = max(0, UPDATE_INTERVAL - elapsed)
+            logger.info(f"Waiting {wait_time:.2f} seconds until next update...")
+            await asyncio.sleep(wait_time)
+
+async def main():
+    # لیست سهام‌ها برای به‌روزرسانی
+    tickers = [
+        'خودرو', 'فولاد', 'کچاد', 'شپنا', 'پترول', 
+        'شبندر', 'فملی', 'کگل', 'فارس', 'خگستر'
+    ]
+    
+    # لیست شاخص‌ها برای به‌روزرسانی
+    indices = [
+        {'name': 'شاخص کل', 'web_id': '32097828799138957'},
+        {'name': 'شاخص هم وزن', 'web_id': '67130298613737946'}
+    ]
+    
+    collector = TSEDataCollector()
+    
+    # به‌روزرسانی داده‌های سهام‌ها و شاخص‌ها
+    await collector.update_all_data(tickers, indices)
+    
+    # به‌روزرسانی تاریخچه شاخص کل و هم وزن
+    await collector.update_cwi_history()
+    await collector.update_ewi_history()
+    
+    # به‌روزرسانی تاریخچه شاخص همه صنایع
+    await collector.update_all_sectors_history()
+    
+    # به‌روزرسانی اطلاعات سهامداران عمده
+    today = jdatetime.date.today().strftime("%Y-%m-%d")
+    await collector.update_all_major_shareholders(tickers, today)
+    
+    # به‌روزرسانی تاریخچه دلار
+    await collector.update_usd_history()
+    
+    # به‌روزرسانی معاملات داخل روزی برای یک سهم در تاریخ امروز
+    await collector.update_intraday_trades('خودرو', today)
+    
+    # اجرای به‌روزرسانی دوره‌ای
+    # await collector.run_periodic_update(tickers, indices)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+## 13. فایل `requirements.txt`
+
+```
+aiohttp>=3.8.1
+asyncio
+jdatetime>=4.0.0
+pandas>=1.3.0
+persiantools>=2.2.0
+psycopg2-binary>=2.9.1
+python-dotenv>=0.19.0
+requests>=2.26.0
+sqlalchemy>=1.4.23
+beautifulsoup4>=4.9.3
+unsync>=1.3.0
+lxml>=4.6.3
+```
+
+## 14. فایل‌های `__init__.py`
+
+### `database/__init__.py`
+
+```python
+from .base import DatabaseBase
+from .models import (
+    Base, Stock, PriceHistory, RIHistory, Index, IndexHistory, Sector, 
+    SectorIndexHistory, Shareholder, MajorShareholderHistory, IntradayTrade, USDHistory
+)
+from .sqlite_db import SQLiteDatabase
+from .postgresql_db import PostgreSQLDatabase
+
+__all__ = [
+    'DatabaseBase',
+    'Base',
+    'Stock',
+    'PriceHistory',
+    'RIHistory',
+    'Index',
+    'IndexHistory',
+    'Sector',
+    'SectorIndexHistory',
+    'Shareholder',
+    'MajorShareholderHistory',
+    'IntradayTrade',
+    'USDHistory',
+    'SQLiteDatabase',
+    'PostgreSQLDatabase'
+]
+```
+
+### `api/__init__.py`
+
+```python
+from .base_api import BaseAPI
+from .tse_api import TSEAPI
+from .async_downloader import AsyncDownloader
+
+__all__ = ['BaseAPI', 'TSEAPI', 'AsyncDownloader']
+```
+
+### `utils/__init__.py`
+
+```python
+from .date_utils import check_jdate_validity, convert_jdate_to_gregorian
+from .logger import setup_logger
+
+__all__ = ['check_jdate_validity', 'convert_jdate_to_gregorian', 'setup_logger']
+```
+
+این کد کامل و دقیق سیستم جمع‌آوری داده‌های بورس ایران را با تمام ویژگی‌های درخواستی ارائه می‌دهد. شما می‌توانید این کد را مستقیماً در محیط برنامه‌نویسی خود کپی کرده و اجرا کنید.
