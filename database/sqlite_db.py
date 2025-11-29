@@ -19,17 +19,23 @@ class SQLiteDatabase(DatabaseBase):
             existing = session.query(Stock).filter(
                 Stock.ticker == stock_data['ticker']
             ).first()
-            
+
             if existing:
                 logger.debug(f"Stock {stock_data['ticker']} already exists")
+                # Ensure all attributes are loaded before expunging
+                session.refresh(existing)
+                session.expunge(existing)
                 return existing
-                
+
             stock = Stock(**stock_data)
             session.add(stock)
             session.commit()
+            # Ensure all attributes are loaded before expunging
+            session.refresh(stock)
+            session.expunge(stock)
             logger.info(f"Added new stock: {stock_data['ticker']}")
             return stock
-            
+
         except Exception as e:
             session.rollback()
             logger.error(f"Error adding stock {stock_data['ticker']}: {e}")
@@ -71,17 +77,23 @@ class SQLiteDatabase(DatabaseBase):
             existing = session.query(Index).filter(
                 Index.name == index_data['name']
             ).first()
-            
+
             if existing:
                 logger.debug(f"Index {index_data['name']} already exists")
+                # Ensure all attributes are loaded before expunging
+                session.refresh(existing)
+                session.expunge(existing)
                 return existing
-                
+
             index = Index(**index_data)
             session.add(index)
             session.commit()
+            # Ensure all attributes are loaded before expunging
+            session.refresh(index)
+            session.expunge(index)
             logger.info(f"Added new index: {index_data['name']}")
             return index
-            
+
         except Exception as e:
             session.rollback()
             logger.error(f"Error adding index {index_data['name']}: {e}")
@@ -102,17 +114,23 @@ class SQLiteDatabase(DatabaseBase):
             existing = session.query(Shareholder).filter(
                 Shareholder.shareholder_id == shareholder_data['shareholder_id']
             ).first()
-            
+
             if existing:
                 logger.debug(f"Shareholder {shareholder_data['shareholder_id']} already exists")
+                # Ensure all attributes are loaded before expunging
+                session.refresh(existing)
+                session.expunge(existing)
                 return existing
-                
+
             shareholder = Shareholder(**shareholder_data)
             session.add(shareholder)
             session.commit()
+            # Ensure all attributes are loaded before expunging
+            session.refresh(shareholder)
+            session.expunge(shareholder)
             logger.info(f"Added new shareholder: {shareholder_data['name']}")
             return shareholder
-            
+
         except Exception as e:
             session.rollback()
             logger.error(f"Error adding shareholder {shareholder_data['name']}: {e}")
