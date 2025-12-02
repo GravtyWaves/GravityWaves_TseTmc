@@ -10,13 +10,18 @@ from .models import (
     Base, Stock, PriceHistory, RIHistory, Index, IndexHistory, Sector, 
     SectorIndexHistory, Shareholder, MajorShareholderHistory, IntradayTrade, USDHistory
 )
-from config import DATABASE_URL, BATCH_SIZE, SECTORS_DATA_FILE
+from config import DATABASE_URL, BATCH_SIZE, SECTORS_DATA_FILE, POSTGRES_CONFIG
 
 logger = logging.getLogger(__name__)
 
 class DatabaseBase(ABC):
     def __init__(self):
-        self.engine = create_engine(DATABASE_URL)
+        if DATABASE_URL.startswith("postgresql"):
+            # استفاده از تنظیمات pool برای PostgreSQL
+            self.engine = create_engine(DATABASE_URL, **POSTGRES_CONFIG)
+        else:
+            self.engine = create_engine(DATABASE_URL)
+        
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
         self.create_tables()
     
