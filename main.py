@@ -10,9 +10,10 @@ from datetime import datetime, timedelta
 from typing import Optional
 import logging
 
-from config import UPDATE_INTERVAL, BATCH_SIZE
+from config import UPDATE_INTERVAL, BATCH_SIZE, DATABASE_TYPE
 from database.sqlite_db import SQLiteDatabase
-from api.tse_api import TSEAPIClient
+from database.postgres_db import PostgreSQLDatabase
+ # حذف وابستگی به TSEAPIClient
 from utils.logger import setup_logger, log_performance
 from utils.helpers import format_jalali_date, parse_jalali_date
 
@@ -20,249 +21,156 @@ from utils.helpers import format_jalali_date, parse_jalali_date
 logger = setup_logger()
 
 class TSEDataCollector:
-    def __init__(self):
-        self.db = SQLiteDatabase()
+    def __init__(self, db_type="sqlite"):
+        if db_type == "postgresql":
+            self.db = PostgreSQLDatabase()
+        else:
+            self.db = SQLiteDatabase()
+        # استفاده از API واقعی
+        from api.tse_api import TSEAPIClient
         self.api = TSEAPIClient()
         
-    def collect_stocks(self) -> int:
-        """جمع‌آوری لیست سهام"""
-        logger.info("Starting stock collection")
-        start_time = time.time()
+    def create_database(self):
+        """ایجاد دیتابیس و جداول"""
+        logger.info("Creating database tables")
+        self.db.create_tables()
+        logger.info("Database tables created successfully")
         
+    def load_initial_data(self):
+        """بارگذاری داده‌های اولیه"""
+        logger.info("Loading initial data")
         try:
-            stock_list = self.api.get_stock_list()
-            if not stock_list:
-                logger.error("Failed to fetch stock list")
-                return 0
+            self.db.load_sectors_from_file()
+            logger.info("Initial data loaded successfully")
+        except Exception as e:
+            logger.error(f"Error loading initial data: {e}")
+            return False
+        return True
+        
+    def rebuild_table(self, table_name: str):
+        """ساختن دوباره یک جدول خاص"""
+        logger.info(f"Rebuilding table: {table_name}")
+        
+        from database.models import Base
+        
+        # دریافت جدول مورد نظر
+        table_class = None
+        for cls in Base.__subclasses__():
+            if cls.__tablename__ == table_name:
+                table_class = cls
+                break
+        
+        if not table_class:
+            logger.error(f"Table {table_name} not found")
+            return False
+        
+        session = self.db.get_session()
+        try:
+            # حذف داده‌های جدول
+            session.query(table_class).delete()
+            session.commit()
+            logger.info(f"Table {table_name} cleared")
             
-            collected_count = 0
-            for stock_data in stock_list:
-                # تبدیل داده‌های API به فرمت دیتابیس
-                db_stock = {
-                    'ticker': stock_data.get('Symbol', ''),
-                    'name': stock_data.get('CompanyName', ''),
-                    'name_en': stock_data.get('CompanyNameEn', ''),
-                    'web_id': str(stock_data.get('InsCode', '')),
-                    'sector_code': stock_data.get('SectorCode', 0.0)
-                }
+            # جمع‌آوری مجدد داده‌ها
+            if table_name == 'stocks':
+                self.collect_stocks()
+            elif table_name == 'sectors':
+                self.collect_sectors()
+            elif table_name == 'indices':
+                self.collect_indices()
+            elif table_name == 'price_history':
+                self.update_price_history(365)  # یک سال تاریخچه
+            elif table_name == 'ri_history':
+                self.update_ri_history(365)  # یک سال تاریخچه
+            else:
+                logger.warning(f"No specific collection method for table {table_name}")
                 
-                if self.db.add_stock(db_stock):
-                    collected_count += 1
-            
-            duration = time.time() - start_time
-            log_performance("collect_stocks", duration, collected_count)
-            logger.info(f"Collected {collected_count} stocks")
-            return collected_count
+            logger.info(f"Table {table_name} rebuilt successfully")
+            return True
             
         except Exception as e:
-            logger.error(f"Error collecting stocks: {e}")
+            session.rollback()
+            logger.error(f"Error rebuilding table {table_name}: {e}")
+            return False
+        finally:
+            session.close()
+    
+    def collect_stocks(self) -> int:
+        """جمع‌آوری لیست سهام با داده واقعی و ذخیره در پایگاه داده"""
+        logger.info("Starting stock collection")
+        stock_list = self.api.get_stock_list()
+        if not stock_list:
+            logger.warning("No stocks fetched from API")
             return 0
+        
+        count = 0
+        for stock in stock_list:
+            stock_data = {
+                'ticker': stock.get('ticker'),
+                'name': stock.get('name'),
+                'web_id': stock.get('web_id'),
+                'market': stock.get('SectorCode', None)
+            }
+            if self.db.add_stock(stock_data):
+                count += 1
+        
+        logger.info(f"Collected {count} new stocks from API (total: {len(stock_list)})")
+        return count
     
     def collect_sectors(self) -> int:
-        """جمع‌آوری لیست صنایع"""
+        """جمع‌آوری لیست صنایع با داده واقعی و ذخیره در پایگاه داده"""
         logger.info("Starting sector collection")
-        start_time = time.time()
-        
-        try:
-            sector_list = self.api.get_sector_list()
-            if not sector_list:
-                logger.error("Failed to fetch sector list")
-                return 0
-            
-            collected_count = 0
-            for sector_data in sector_list:
-                # تبدیل داده‌های API به فرمت دیتابیس
-                db_sector = {
-                    'sector_code': sector_data.get('SectorCode', 0.0),
-                    'sector_name': sector_data.get('SectorName', ''),
-                    'sector_name_en': sector_data.get('SectorNameEn', ''),
-                    'naics_code': sector_data.get('NAICSCode', ''),
-                    'naics_name': sector_data.get('NAICSName', '')
-                }
-                
-                # بررسی وجود صنعت
-                existing = self.db.get_sector_by_code(db_sector['sector_code'])
-                if not existing:
-                    # درج صنعت جدید
-                    from database.models import Sector
-                    sector = Sector(**db_sector)
-                    session = self.db.get_session()
-                    try:
-                        session.add(sector)
-                        session.commit()
-                        collected_count += 1
-                    except Exception as e:
-                        session.rollback()
-                        logger.error(f"Error adding sector {db_sector['sector_code']}: {e}")
-                    finally:
-                        session.close()
-            
-            duration = time.time() - start_time
-            log_performance("collect_sectors", duration, collected_count)
-            logger.info(f"Collected {collected_count} sectors")
-            return collected_count
-            
-        except Exception as e:
-            logger.error(f"Error collecting sectors: {e}")
+        sector_list = self.api.get_sector_list()
+        if not sector_list:
+            logger.warning("No sectors fetched from API")
             return 0
+        count = 0
+        for sector in sector_list:
+            try:
+                sector_code = float(sector.get('SectorCode', 0))
+            except (ValueError, TypeError):
+                sector_code = 0.0
+            sector_data = {
+                'sector_code': sector_code,
+                'sector_name': sector.get('SectorName', ''),
+                'sector_name_en': sector.get('SectorNameEn', '')
+            }
+            result = self.db.add_sector(sector_data)
+            if result:
+                count += 1
+        logger.info(f"Collected {count} sectors from API")
+        return count
     
     def collect_indices(self) -> int:
-        """جمع‌آوری لیست شاخص‌ها"""
+        """جمع‌آوری لیست شاخص‌ها با داده واقعی و ذخیره در پایگاه داده"""
         logger.info("Starting index collection")
-        start_time = time.time()
-        
-        try:
-            index_list = self.api.get_index_list()
-            if not index_list:
-                logger.error("Failed to fetch index list")
-                return 0
-            
-            collected_count = 0
-            for index_data in index_list:
-                # تبدیل داده‌های API به فرمت دیتابیس
-                db_index = {
-                    'name': index_data.get('IndexName', ''),
-                    'name_en': index_data.get('IndexNameEn', ''),
-                    'web_id': str(index_data.get('InsCode', ''))
-                }
-                
-                if self.db.add_index(db_index):
-                    collected_count += 1
-            
-            duration = time.time() - start_time
-            log_performance("collect_indices", duration, collected_count)
-            logger.info(f"Collected {collected_count} indices")
-            return collected_count
-            
-        except Exception as e:
-            logger.error(f"Error collecting indices: {e}")
+        index_list = self.api.get_index_list()
+        if not index_list:
+            logger.warning("No indices fetched from API")
             return 0
+        count = 0
+        for index in index_list:
+            index_data = {
+                'name': index.get('name'),
+                'web_id': index.get('web_id')
+            }
+            result = self.db.add_index(index_data)
+            if result:
+                count += 1
+        logger.info(f"Collected {count} indices from API")
+        return count
     
     def update_price_history(self, days: int = 30) -> int:
-        """به‌روزرسانی تاریخچه قیمت سهام"""
+        """به‌روزرسانی تاریخچه قیمت سهام - استفاده از scraping مستقیم"""
         logger.info(f"Starting price history update for last {days} days")
-        start_time = time.time()
-        
-        try:
-            from_date, to_date = self.api.get_date_range(days)
-            
-            # دریافت لیست سهام
-            session = self.db.get_session()
-            stocks = session.query(self.db.Stock).all()
-            session.close()
-            
-            total_updated = 0
-            for stock in stocks:
-                try:
-                    # بررسی آخرین تاریخ قیمت
-                    last_date = self.db.get_last_price_date(stock.id)
-                    
-                    if last_date:
-                        # فقط داده‌های جدید را دریافت کنیم
-                        last_dt = parse_jalali_date(last_date)
-                        if last_dt:
-                            from_dt = last_dt + timedelta(days=1)
-                            from_date = format_jalali_date(from_dt)
-                    
-                    # دریافت تاریخچه قیمت
-                    history = self.api.get_price_history(stock.web_id, from_date, to_date)
-                    if history:
-                        # تبدیل به فرمت دیتابیس
-                        db_history = []
-                        for item in history:
-                            db_item = {
-                                'stock_id': stock.id,
-                                'date': parse_jalali_date(item.get('DEven', '')),
-                                'j_date': item.get('DEven', ''),
-                                'open_price': item.get('PriceFirst', None),
-                                'high_price': item.get('PriceMax', None),
-                                'low_price': item.get('PriceMin', None),
-                                'close_price': item.get('PClosing', None),
-                                'volume': item.get('QTotTran5J', None),
-                                'value': item.get('QTotCap', None),
-                                'count': item.get('ZTotTran', None)
-                            }
-                            db_history.append(db_item)
-                        
-                        if db_history:
-                            updated = self.db.add_price_history(db_history)
-                            total_updated += updated
-                            logger.debug(f"Updated {updated} price records for {stock.ticker}")
-                
-                except Exception as e:
-                    logger.error(f"Error updating price history for {stock.ticker}: {e}")
-            
-            duration = time.time() - start_time
-            log_performance("update_price_history", duration, total_updated)
-            logger.info(f"Updated {total_updated} price history records")
-            return total_updated
-            
-        except Exception as e:
-            logger.error(f"Error updating price history: {e}")
-            return 0
+        logger.warning("Price history update from scraping not fully implemented yet")
+        return 0
     
     def update_ri_history(self, days: int = 30) -> int:
-        """به‌روزرسانی تاریخچه حقیقی-حقوقی"""
+        """به‌روزرسانی تاریخچه حقیقی-حقوقی - استفاده از scraping مستقیم"""
         logger.info(f"Starting RI history update for last {days} days")
-        start_time = time.time()
-        
-        try:
-            from_date, to_date = self.api.get_date_range(days)
-            
-            # دریافت لیست سهام
-            session = self.db.get_session()
-            stocks = session.query(self.db.Stock).all()
-            session.close()
-            
-            total_updated = 0
-            for stock in stocks:
-                try:
-                    # بررسی آخرین تاریخ RI
-                    last_date = self.db.get_last_ri_date(stock.id)
-                    
-                    if last_date:
-                        last_dt = parse_jalali_date(last_date)
-                        if last_dt:
-                            from_dt = last_dt + timedelta(days=1)
-                            from_date = format_jalali_date(from_dt)
-                    
-                    # دریافت تاریخچه RI
-                    history = self.api.get_ri_history(stock.web_id, from_date, to_date)
-                    if history:
-                        # تبدیل به فرمت دیتابیس
-                        db_history = []
-                        for item in history:
-                            db_item = {
-                                'stock_id': stock.id,
-                                'date': parse_jalali_date(item.get('DEven', '')),
-                                'j_date': item.get('DEven', ''),
-                                'individual_buy_volume': item.get('QTotTran5Buy_N', None),
-                                'individual_sell_volume': item.get('QTotTran5Sell_N', None),
-                                'individual_buy_value': item.get('QTotCapBuy_N', None),
-                                'individual_sell_value': item.get('QTotCapSell_N', None),
-                                'institutional_buy_volume': item.get('QTotTran5Buy_I', None),
-                                'institutional_sell_volume': item.get('QTotTran5Sell_I', None),
-                                'institutional_buy_value': item.get('QTotCapBuy_I', None),
-                                'institutional_sell_value': item.get('QTotCapSell_I', None)
-                            }
-                            db_history.append(db_item)
-                        
-                        if db_history:
-                            updated = self.db.add_ri_history(db_history)
-                            total_updated += updated
-                            logger.debug(f"Updated {updated} RI records for {stock.ticker}")
-                
-                except Exception as e:
-                    logger.error(f"Error updating RI history for {stock.ticker}: {e}")
-            
-            duration = time.time() - start_time
-            log_performance("update_ri_history", duration, total_updated)
-            logger.info(f"Updated {total_updated} RI history records")
-            return total_updated
-            
-        except Exception as e:
-            logger.error(f"Error updating RI history: {e}")
-            return 0
+        logger.warning("RI history update from scraping not fully implemented yet")
+        return 0
     
     def run_full_update(self) -> dict:
         """اجرای به‌روزرسانی کامل"""
@@ -302,48 +210,136 @@ class TSEDataCollector:
             except Exception as e:
                 logger.error(f"Error in continuous update: {e}")
                 time.sleep(60)  # انتظار یک دقیقه در صورت خطا
+def create_parser():
+    parser = argparse.ArgumentParser(description='TSE Data Collector',
+                                     formatter_class=argparse.RawDescriptionHelpFormatter,
+                                     epilog="""
+Examples:
+  # ایجاد دیتابیس SQLite
+  python main.py create-db --type sqlite
+  
+  # ایجاد دیتابیس PostgreSQL
+  python main.py create-db --type postgresql
+  
+  # بارگذاری داده‌های اولیه
+  python main.py load-initial-data
+  
+  # به‌روزرسانی کامل
+  python main.py update --mode full
+  
+  # به‌روزرسانی فقط سهام
+  python main.py update --mode stocks
+  
+  # به‌روزرسانی تاریخچه قیمت برای 90 روز
+  python main.py update --mode prices --days 90
+  
+  # ساختن دوباره جدول سهام
+  python main.py rebuild-table --table stocks
+  
+  # اجرای به‌روزرسانی مداوم
+  python main.py continuous-update --interval 3600
+""")
+
+    subparsers = parser.add_subparsers(dest='command', help='Command to execute')
+
+    # دستور ایجاد دیتابیس
+    create_db_parser = subparsers.add_parser('create-db', help='Create database and tables')
+    create_db_parser.add_argument('--type', choices=['sqlite', 'postgresql'],
+                                  default='sqlite', help='Database type')
+
+    # دستور بارگذاری داده‌های اولیه
+    load_parser = subparsers.add_parser('load-initial-data', help='Load initial data')
+
+    # دستور به‌روزرسانی
+    update_parser = subparsers.add_parser('update', help='Update data')
+    update_parser.add_argument('--mode', choices=['full', 'stocks', 'sectors', 'indices', 'prices', 'ri'],
+                               default='full', help='Update mode')
+    update_parser.add_argument('--days', type=int, default=30, help='Number of days to update')
+    update_parser.add_argument('--type', choices=['sqlite', 'postgresql'],
+                               default='sqlite', help='Database type')
+
+    # دستور ساختن دوباره جدول
+    rebuild_parser = subparsers.add_parser('rebuild-table', help='Rebuild specific table')
+    rebuild_parser.add_argument('--table', required=True,
+                                choices=['stocks', 'sectors', 'indices', 'price_history', 'ri_history'],
+                                help='Table to rebuild')
+    rebuild_parser.add_argument('--type', choices=['sqlite', 'postgresql'],
+                                default='sqlite', help='Database type')
+
+    # دستور به‌روزرسانی مداوم
+    continuous_parser = subparsers.add_parser('continuous-update', help='Continuous update')
+    continuous_parser.add_argument('--interval', type=int, default=None,
+                                   help='Update interval in seconds')
+    continuous_parser.add_argument('--type', choices=['sqlite', 'postgresql'],
+                                   default='sqlite', help='Database type')
+
+    return parser
+
 
 def main():
-    parser = argparse.ArgumentParser(description='TSE Data Collector')
-    parser.add_argument('--mode', choices=['full', 'continuous', 'stocks', 'sectors', 'indices', 'prices', 'ri'], 
-                       default='full', help='Update mode')
-    parser.add_argument('--days', type=int, default=30, help='Number of days to update')
-    parser.add_argument('--interval', type=int, default=None, help='Update interval in seconds')
-    
+    parser = create_parser()
     args = parser.parse_args()
 
+    if not args.command:
+        parser.print_help()
+        return
+
     try:
-        collector = TSEDataCollector()
-        if args.mode == 'full':
-            results = collector.run_full_update()
-            print(f"Update completed: {results}")
-            
-        elif args.mode == 'continuous':
+        collector = TSEDataCollector(args.type if hasattr(args, 'type') else 'sqlite')
+
+        if args.command == 'create-db':
+            collector.create_database()
+            print("Database created successfully")
+
+        elif args.command == 'load-initial-data':
+            if collector.load_initial_data():
+                print("Initial data loaded successfully")
+            else:
+                print("Failed to load initial data")
+                sys.exit(1)
+
+        elif args.command == 'update':
+            if args.mode == 'full':
+                results = collector.run_full_update()
+                print(f"Update completed: {results}")
+
+            elif args.mode == 'stocks':
+                count = collector.collect_stocks()
+                print(f"Collected {count} stocks")
+
+            elif args.mode == 'sectors':
+                count = collector.collect_sectors()
+                print(f"Collected {count} sectors")
+
+            elif args.mode == 'indices':
+                count = collector.collect_indices()
+                print(f"Collected {count} indices")
+
+            elif args.mode == 'prices':
+                count = collector.update_price_history(args.days)
+                print(f"Updated {count} price records")
+
+            elif args.mode == 'ri':
+                count = collector.update_ri_history(args.days)
+                print(f"Updated {count} RI records")
+
+        elif args.command == 'rebuild-table':
+            if collector.rebuild_table(args.table):
+                print(f"Table {args.table} rebuilt successfully")
+            else:
+                print(f"Failed to rebuild table {args.table}")
+                sys.exit(1)
+
+        elif args.command == 'continuous-update':
             collector.run_continuous_update(args.interval)
-            
-        elif args.mode == 'stocks':
-            count = collector.collect_stocks()
-            print(f"Collected {count} stocks")
-            
-        elif args.mode == 'sectors':
-            count = collector.collect_sectors()
-            print(f"Collected {count} sectors")
-            
-        elif args.mode == 'indices':
-            count = collector.collect_indices()
-            print(f"Collected {count} indices")
-            
-        elif args.mode == 'prices':
-            count = collector.update_price_history(args.days)
-            print(f"Updated {count} price records")
-            
-        elif args.mode == 'ri':
-            count = collector.update_ri_history(args.days)
-            print(f"Updated {count} RI records")
-            
+
+        else:
+            logger.error(f"Unknown command: {args.command}")
+
     except Exception as e:
         logger.error(f"Application error: {e}")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
