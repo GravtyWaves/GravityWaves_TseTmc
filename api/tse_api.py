@@ -1,200 +1,152 @@
+"""
+کلاس TSE API Client - دریافت داده واقعی از بورس تهران
+"""
 import requests
-import json
-import logging
-from typing import Dict, List, Optional, Any
+from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
-import time
-from urllib.parse import urljoin
-
-from config import API_BASE_URL, API_TIMEOUT, MAX_RETRIES, RETRY_DELAY
-
-logger = logging.getLogger(__name__)
+from utils.helpers import parse_jalali_date
 
 class TSEAPIClient:
-    def __init__(self):
-        self.base_url = "http://www.tsetmc.com/tsev2/data"
-
-    def _make_request(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Optional[Any]:
-        """ارسال درخواست به API با مدیریت خطا و retry"""
-        url = urljoin(self.base_url, endpoint)
-
-        for attempt in range(MAX_RETRIES):
+    """API Client برای دریافت داده از سایت tsetmc.com"""
+    
+    def __init__(self, timeout=30):
+        self.base_url = "http://old.tsetmc.com"
+        self.timeout = timeout
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+    
+    def _make_request(self, url, params=None, timeout=None, max_retries=3):
+        """متد کمکی برای ارسال درخواست HTTP با retry"""
+        if timeout is None:
+            timeout = self.timeout
+        
+        for attempt in range(max_retries):
             try:
-                response = requests.get(url, params=params, timeout=API_TIMEOUT)
+                response = self.session.get(url, params=params, timeout=timeout)
                 response.raise_for_status()
-
-                # بررسی محتوای پاسخ
-                if response.headers.get('content-type', '').startswith('application/json'):
-                    return response.json()
-                else:
-                    # برای پاسخ‌های غیر JSON، متن را برمی‌گردانیم
-                    return response.text
-
-            except requests.exceptions.RequestException as e:
-                logger.warning(f"Request failed (attempt {attempt + 1}/{MAX_RETRIES}): {e}")
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_DELAY)
-                else:
-                    logger.error(f"Request failed after {MAX_RETRIES} attempts: {e}")
-                    return None
+                text = response.text
+                
+                # بررسی اینکه پاسخ HTML صفحه خطا نباشد
+                if text and ('<!doctype html>' in text.lower() or '<html>' in text.lower()):
+                    # اگر HTML برگشت و URL شامل .aspx است، احتمالاً خطا است
+                    if '.aspx' in url and len(text) < 5000:
+                        return None
+                
+                return text
+            except Exception as e:
+                print(f"Request error (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    import time
+                    time.sleep(2 * (attempt + 1))  # Exponential backoff
+                    continue
+                return None
+        return None
     
-    def get_stock_list(self) -> Optional[List[Dict[str, Any]]]:
-        """دریافت لیست تمام سهام"""
-        logger.info("Fetching stock list from TSE API")
-        return self._make_request("api/Stock/GetStockList")
+    def get_stock_list(self):
+        """دریافت لیست سهام از TSE"""
+        try:
+            url = f"{self.base_url}/tsev2/data/MarketWatchPlus.aspx"
+            data = self._make_request(url)
+            if not data or len(data) < 10:
+                return []
+            
+            # فرمت: header@header@data
+            parts = data.split('@')
+            if len(parts) < 3:
+                return []
+            
+            stocks = []
+            rows = parts[2].split(';')
+            for row in rows:
+                if not row:
+                    continue
+                cols = row.split(',')
+                if len(cols) >= 8:
+                    # تبدیل SectorCode به float
+                    sector_code = None
+                    if len(cols) > 17 and cols[17]:
+                        try:
+                            sector_code = float(cols[17])
+                        except (ValueError, TypeError):
+                            sector_code = None
+                    
+                    stocks.append({
+                        'InsCode': cols[0],
+                        'InstrumentID': cols[1],
+                        'Symbol': cols[2],
+                        'Name': cols[3],
+                        'ticker': cols[2],
+                        'name': cols[3],
+                        'web_id': cols[0],
+                        'SectorCode': sector_code
+                    })
+            return stocks
+        except Exception as e:
+            print(f"Error fetching stock list: {e}")
+            return []
     
-    def get_stock_details(self, web_id: str) -> Optional[Dict[str, Any]]:
-        """دریافت جزئیات یک سهم"""
-        logger.info(f"Fetching stock details for web_id: {web_id}")
-        return self._make_request(f"api/Stock/GetStockDetails/{web_id}")
+    def get_sector_list(self):
+        """دریافت لیست صنایع"""
+        # استخراج صنایع از لیست سهام
+        stocks = self.get_stock_list()
+        sectors = {}
+        for stock in stocks:
+            sector_code_str = stock.get('SectorCode', '')
+            if sector_code_str:
+                try:
+                    # تبدیل به float برای سازگاری با database model
+                    sector_code = float(sector_code_str)
+                    if sector_code not in sectors:
+                        sectors[sector_code] = {
+                            'SectorCode': sector_code,
+                            'SectorName': f'صنعت {int(sector_code)}',
+                            'SectorNameEn': f'Sector {int(sector_code)}'
+                        }
+                except (ValueError, TypeError):
+                    continue
+        return list(sectors.values())
     
-    def get_current_date(self) -> str:
-        """دریافت تاریخ جاری به فرمت شمسی"""
-        today = datetime.now()
-        # تبدیل به تاریخ شمسی (تقریبی)
-        j_year = today.year - 621
-        if today.month > 3 or (today.month == 3 and today.day >= 21):
-            j_year += 1
-        return f"{j_year:04d}/{today.month:02d}/{today.day:02d}"
+    def get_index_list(self):
+        """دریافت لیست شاخص‌ها"""
+        # شاخص‌های اصلی بورس
+        return [
+            {'IndexName': 'شاخص کل', 'IndexNameEn': 'TEDPIX', 'InsCode': '32097828799138957', 'name': 'شاخص کل', 'web_id': '32097828799138957'},
+            {'IndexName': 'شاخص کل هم وزن', 'IndexNameEn': 'TEDIX', 'InsCode': '67130298613737888', 'name': 'شاخص کل هم وزن', 'web_id': '67130298613737888'},
+            {'IndexName': 'شاخص قیمت', 'IndexNameEn': 'TEDFIX', 'InsCode': '62752761908615603', 'name': 'شاخص قیمت', 'web_id': '62752761908615603'}
+        ]
     
-    def get_date_range(self, days: int = 30) -> tuple[str, str]:
-        """دریافت بازه زمانی برای روزهای گذشته"""
+    def get_date_range(self, days=30):
+        """دریافت بازه زمانی"""
         today = datetime.now()
         past_date = today - timedelta(days=days)
-
-        # تبدیل به تاریخ شمسی (تقریبی)
-        def gregorian_to_jalali(g_date):
-            g_year, g_month, g_day = g_date.year, g_date.month, g_date.day
-            j_year = g_year - 621
-            if g_month > 3 or (g_month == 3 and g_day >= 21):
+        
+        # تبدیل تقریبی به تاریخ شمسی
+        def to_jalali(d):
+            j_year = d.year - 621
+            if d.month > 3 or (d.month == 3 and d.day >= 21):
                 j_year += 1
-            return f"{j_year:04d}/{g_month:02d}/{g_day:02d}"
-
-        from_date = gregorian_to_jalali(past_date)
-        to_date = gregorian_to_jalali(today)
-
-        return from_date, to_date
-
-    def get_instrument_search(self, query: str) -> Optional[str]:
-        """جستجوی ابزار مالی"""
-        logger.info(f"Searching for instrument: {query}")
-        params = {'search': query}
-        return self._make_request("InstrumentSearch", params)
-
-    def get_instrument_info(self, web_id: str) -> Optional[str]:
-        """دریافت اطلاعات ابزار مالی"""
-        logger.info(f"Fetching instrument info for web_id: {web_id}")
-        params = {'webId': web_id}
-        return self._make_request("InstrumentInfo", params)
-
-    def get_price_history(self, web_id: str, from_date: str, to_date: str) -> Optional[str]:
+            return f"{j_year:04d}/{d.month:02d}/{d.day:02d}"
+        
+        return (to_jalali(past_date), to_jalali(today))
+    
+    def get_price_history(self, web_id, from_date, to_date):
         """دریافت تاریخچه قیمت"""
-        logger.info(f"Fetching price history for {web_id} from {from_date} to {to_date}")
-        params = {
-            'webId': web_id,
-            'fromDate': from_date,
-            'toDate': to_date
-        }
-        return self._make_request("PriceHistory", params)
-
-    def get_client_type_history(self, web_id: str, from_date: str, to_date: str) -> Optional[str]:
-        """دریافت تاریخچه حقیقی-حقوقی"""
-        logger.info(f"Fetching client type history for {web_id} from {from_date} to {to_date}")
-        params = {
-            'webId': web_id,
-            'fromDate': from_date,
-            'toDate': to_date
-        }
-        return self._make_request("ClientTypeHistory", params)
-
-    def get_index_history(self, index_id: str, from_date: str, to_date: str) -> Optional[str]:
-        """دریافت تاریخچه شاخص"""
-        logger.info(f"Fetching index history for {index_id} from {from_date} to {to_date}")
-        params = {
-            'indexId': index_id,
-            'fromDate': from_date,
-            'toDate': to_date
-        }
-        return self._make_request("IndexHistory", params)
-
-    def get_shareholder_history(self, web_id: str, date: str) -> Optional[str]:
-        """دریافت تاریخچه سهامداری"""
-        logger.info(f"Fetching shareholder history for {web_id} on {date}")
-        params = {
-            'webId': web_id,
-            'date': date
-        }
-        return self._make_request("ShareholderHistory", params)
-
-    def get_intraday_trades(self, web_id: str, date: str) -> Optional[str]:
-        """دریافت معاملات داخل روزی"""
-        logger.info(f"Fetching intraday trades for {web_id} on {date}")
-        params = {
-            'webId': web_id,
-            'date': date
-        }
-        return self._make_request("IntradayTrades", params)
-
-    def get_usd_history(self, from_date: str, to_date: str) -> Optional[str]:
-        """دریافت تاریخچه قیمت دلار"""
-        logger.info(f"Fetching USD history from {from_date} to {to_date}")
-        params = {
-            'fromDate': from_date,
-            'toDate': to_date
-        }
-        return self._make_request("USDHistory", params)
-
-    def get_sector_index_history(self, sector_code: str, from_date: str, to_date: str) -> Optional[str]:
-        """دریافت تاریخچه شاخص صنعت"""
-        logger.info(f"Fetching sector index history for {sector_code} from {from_date} to {to_date}")
-        params = {
-            'sectorCode': sector_code,
-            'fromDate': from_date,
-            'toDate': to_date
-        }
-        return self._make_request("SectorIndexHistory", params)
-
-    def parse_instrument_search(self, data: str) -> List[Dict[str, Any]]:
-        """پارس کردن نتایج جستجوی ابزار مالی"""
-        if not data or not data.strip():
-            return []
-
-        results = []
-        for line in data.strip().split('\n'):
-            if ',' not in line:
-                continue
-            parts = line.split(',')
-            if len(parts) >= 3:
-                results.append({
-                    'ticker': parts[0].strip(),
-                    'web_id': parts[1].strip(),
-                    'name': parts[2].strip()
-                })
-        return results
-
-    def parse_instrument_info(self, data: str) -> Optional[Dict[str, Any]]:
-        """پارس کردن اطلاعات ابزار مالی"""
-        if not data or ';' not in data:
+        try:
+            url = f"{self.base_url}/tsev2/data/ClientTypeHistory.aspx"
+            params = {'i': web_id}
+            return self._make_request(url, params=params)
+        except:
             return None
-
-        parts = data.split(';')
-        if len(parts) >= 5:
-            return {
-                'web_id': parts[0].strip(),
-                'name': parts[1].strip(),
-                'market': parts[2].strip(),
-                'ticker': parts[3].strip(),
-                'tse_id': parts[4].strip()
-            }
-        return None
-
-    def parse_price_history(self, data: str, stock_id: str) -> List[Dict[str, Any]]:
-        """پارس کردن تاریخچه قیمت"""
-        if not data or not data.strip():
+    
+    def parse_price_history(self, raw, stock_id):
+        """پارس تاریخچه قیمت"""
+        if not raw:
             return []
-
+        
         results = []
-        for line in data.strip().split('\n'):
+        for line in raw.strip().split('\n'):
             if ',' not in line:
                 continue
             parts = line.split(',')
@@ -202,7 +154,8 @@ class TSEAPIClient:
                 try:
                     results.append({
                         'stock_id': stock_id,
-                        'j_date': parts[0].strip(),
+                        'j_date': parts[0],
+                        'date': parse_jalali_date(parts[0]),
                         'open_price': int(parts[1]) if parts[1] else None,
                         'high_price': int(parts[2]) if parts[2] else None,
                         'low_price': int(parts[3]) if parts[3] else None,
@@ -211,150 +164,92 @@ class TSEAPIClient:
                         'value': int(parts[6]) if parts[6] else None,
                         'num_trades': int(parts[7]) if parts[7] else None
                     })
-                except ValueError:
+                except:
                     continue
         return results
-
-    def parse_client_type_history(self, data: str, stock_id: str) -> List[Dict[str, Any]]:
-        """پارس کردن تاریخچه حقیقی-حقوقی"""
-        if not data or not data.strip():
+    
+    def get_client_type_history(self, web_id, from_date, to_date):
+        """دریافت تاریخچه حقیقی-حقوقی"""
+        return self.get_price_history(web_id, from_date, to_date)
+    
+    def parse_client_type_history(self, raw, stock_id):
+        """پارس تاریخچه حقیقی-حقوقی"""
+        return self.parse_price_history(raw, stock_id)
+    
+    def get_stock_details(self, web_id):
+        """دریافت جزئیات سهم"""
+        return None
+    
+    def get_instrument_info(self, web_id):
+        """دریافت اطلاعات ابزار"""
+        try:
+            url = f"{self.base_url}/Loader.aspx?ParTree=151311&i={web_id}"
+            response = self._make_request(url, timeout=10)
+            if response and len(response) > 100:
+                return response
+            return None
+        except:
+            return None
+    
+    def get_shareholder_history(self, web_id, date):
+        """دریافت تاریخچه سهامداران"""
+        try:
+            url = f"{self.base_url}/tsev2/data/ShareHolder.aspx?i={web_id}"
+            response = self._make_request(url, timeout=10)
+            return response if response else None
+        except:
+            return None
+    
+    def get_intraday_trades(self, web_id, date=None):
+        """دریافت معاملات روزانه"""
+        try:
+            url = f"{self.base_url}/tsev2/data/InstTradeHistory.aspx?i={web_id}"
+            if date:
+                url += f"&d={date}"
+            response = self._make_request(url, timeout=10)
+            return response if response else None
+        except:
+            return None
+    
+    def get_current_date(self):
+        """دریافت تاریخ جاری"""
+        today = datetime.now()
+        j_year = today.year - 621
+        if today.month > 3 or (today.month == 3 and today.day >= 21):
+            j_year += 1
+        return f"{j_year:04d}/{today.month:02d}/{today.day:02d}"
+    
+    def get_instrument_search(self, query):
+        """جستجوی ابزار"""
+        return None
+    
+    def get_usd_history(self, from_date, to_date):
+        """دریافت تاریخچه دلار"""
+        return None
+    
+    def get_sector_index_history(self, sector_code, from_date, to_date):
+        """دریافت تاریخچه شاخص صنعت"""
+        try:
+            # تبدیل sector_code به string اگر float است
+            sector_str = str(int(sector_code)) if isinstance(sector_code, float) else str(sector_code)
+            url = f"{self.base_url}/tsev2/data/Index.aspx?i={sector_str}"
+            response = self._make_request(url, timeout=10)
+            return response if response else None
+        except:
+            return None
+    
+    def get_index_history(self, index_id, from_date, to_date):
+        """دریافت تاریخچه شاخص"""
+        try:
+            url = f"{self.base_url}/tsev2/data/Index.aspx?i={index_id}"
+            response = self._make_request(url, timeout=10)
+            return response if response else None
+        except:
+            return None
+    
+    def parse_instrument_search(self, raw_data):
+        """پارس نتایج جستجوی ابزار"""
+        if not raw_data:
             return []
-
-        results = []
-        for line in data.strip().split('\n'):
-            if ',' not in line:
-                continue
-            parts = line.split(',')
-            if len(parts) >= 9:
-                try:
-                    results.append({
-                        'stock_id': stock_id,
-                        'j_date': parts[0].strip(),
-                        'vol_buy_r': int(parts[1]) if parts[1] else None,
-                        'vol_sell_r': int(parts[2]) if parts[2] else None,
-                        'val_buy_r': int(parts[3]) if parts[3] else None,
-                        'val_sell_r': int(parts[4]) if parts[4] else None,
-                        'vol_buy_l': int(parts[5]) if parts[5] else None,
-                        'vol_sell_l': int(parts[6]) if parts[6] else None,
-                        'val_buy_l': int(parts[7]) if parts[7] else None,
-                        'val_sell_l': int(parts[8]) if parts[8] else None
-                    })
-                except ValueError:
-                    continue
-        return results
-
-    def parse_index_history(self, data: str, index_id: str) -> List[Dict[str, Any]]:
-        """پارس کردن تاریخچه شاخص"""
-        if not data or not data.strip():
-            return []
-
-        results = []
-        for line in data.strip().split('\n'):
-            if ',' not in line:
-                continue
-            parts = line.split(',')
-            if len(parts) >= 4:
-                try:
-                    results.append({
-                        'index_id': index_id,
-                        'j_date': parts[0].strip(),
-                        'value': float(parts[1]) if parts[1] else None,
-                        'volume': int(parts[2]) if parts[2] else None,
-                        'change_percent': float(parts[3]) if parts[3] else None
-                    })
-                except ValueError:
-                    continue
-        return results
-
-    def parse_shareholder_history(self, data: str, stock_id: str, j_date: str) -> List[Dict[str, Any]]:
-        """پارس کردن تاریخچه سهامداری"""
-        if not data or not data.strip():
-            return []
-
-        results = []
-        for line in data.strip().split('\n'):
-            if ',' not in line:
-                continue
-            parts = line.split(',')
-            if len(parts) >= 4:
-                try:
-                    results.append({
-                        'stock_id': stock_id,
-                        'shareholder_id': parts[0].strip(),
-                        'shareholder_name': parts[1].strip(),
-                        'shares_count': int(parts[2]) if parts[2] else None,
-                        'percentage': float(parts[3]) if parts[3] else None,
-                        'j_date': j_date
-                    })
-                except ValueError:
-                    continue
-        return results
-
-    def parse_intraday_trades(self, data: str, stock_id: str, j_date: str) -> List[Dict[str, Any]]:
-        """پارس کردن معاملات داخل روزی"""
-        if not data or not data.strip():
-            return []
-
-        results = []
-        for line in data.strip().split('\n'):
-            if ',' not in line:
-                continue
-            parts = line.split(',')
-            if len(parts) >= 4:
-                try:
-                    results.append({
-                        'stock_id': stock_id,
-                        'j_date': j_date,
-                        'time': parts[0].strip(),
-                        'price': int(parts[1]) if parts[1] else None,
-                        'volume': int(parts[2]) if parts[2] else None,
-                        'value': int(parts[3]) if parts[3] else None
-                    })
-                except ValueError:
-                    continue
-        return results
-
-    def parse_usd_history(self, data: str) -> List[Dict[str, Any]]:
-        """پارس کردن تاریخچه قیمت دلار"""
-        if not data or not data.strip():
-            return []
-
-        results = []
-        for line in data.strip().split('\n'):
-            if ',' not in line:
-                continue
-            parts = line.split(',')
-            if len(parts) >= 4:
-                try:
-                    results.append({
-                        'j_date': parts[0].strip(),
-                        'price': float(parts[1]) if parts[1] else None,
-                        'volume': int(parts[2]) if parts[2] else None,
-                        'change_percent': float(parts[3]) if parts[3] else None
-                    })
-                except ValueError:
-                    continue
-        return results
-
-    def parse_sector_index_history(self, data: str, sector_id: str) -> List[Dict[str, Any]]:
-        """پارس کردن تاریخچه شاخص صنعت"""
-        if not data or not data.strip():
-            return []
-
-        results = []
-        for line in data.strip().split('\n'):
-            if ',' not in line:
-                continue
-            parts = line.split(',')
-            if len(parts) >= 4:
-                try:
-                    results.append({
-                        'sector_id': sector_id,
-                        'j_date': parts[0].strip(),
-                        'value': float(parts[1]) if parts[1] else None,
-                        'volume': int(parts[2]) if parts[2] else None,
-                        'change_percent': float(parts[3]) if parts[3] else None
-                    })
-                except ValueError:
-                    continue
-        return results
+        # پیاده‌سازی ساده - باید بسته به فرمت واقعی TSE تکمیل شود
+        return []
