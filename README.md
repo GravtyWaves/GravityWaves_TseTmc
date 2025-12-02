@@ -4,12 +4,12 @@
 
 ## ویژگی‌ها
 
-- **جمع‌آوری داده‌های لحظه‌ای**: دریافت اطلاعات زنده از API بورس تهران
+- **جمع‌آوری داده‌های لحظه‌ای**: دریافت اطلاعات زنده از طریق اسکرپ وب‌سایت بورس تهران
 - **پایگاه داده محلی**: ذخیره‌سازی داده‌ها در SQLite با استفاده از SQLAlchemy
 - **تاریخچه کامل**: ذخیره قیمت‌ها، معاملات حقیقی-حقوقی، شاخص‌ها و داده‌های صنایع
 - **به‌روزرسانی خودکار**: امکان اجرای مداوم برای جمع‌آوری داده‌های جدید
 - **لاگ‌گیری کامل**: ثبت تمامی عملیات و خطاها
-- **API کاربرپسند**: رابط برنامه‌نویسی ساده برای توسعه‌دهندگان
+اسکرپ داده‌های بازار و ذخیره‌سازی در دیتابیس
 
 ## ساختار پروژه
 
@@ -25,7 +25,7 @@ tse_collector/
 │   └── sqlite_db.py      # پیاده‌سازی SQLite
 ├── api/
 │   ├── __init__.py
-│   ├── tse_api.py        # کلاینت API بورس
+│   ├── scraper.py        # اسکرپر داده‌های بورس
 │   └── ...
 ├── utils/
 │   ├── __init__.py
@@ -38,7 +38,7 @@ tse_collector/
 ## پیش‌نیازها
 
 - Python 3.8+
-- دسترسی به اینترنت برای دریافت داده‌ها از API بورس
+دسترسی به اینترنت برای اسکرپ داده‌ها از وب‌سایت بورس
 
 ## نصب و راه‌اندازی
 
@@ -74,20 +74,20 @@ python main.py --mode stocks
 python main.py --mode prices --days 30
 ```
 
-## استفاده از API
+## استفاده از اسکرپر
 
 ```python
-from api.tse_api import TSEAPIClient
+from api.scraper import TSEWebScraper
 from database.sqlite_db import SQLiteDatabase
 
-# اتصال به API
-api = TSEAPIClient()
+# ساخت اسکرپر
+scraper = TSEWebScraper()
 
 # دریافت لیست سهام
-stocks = api.get_stock_list()
+stocks = scraper.scrape_stock_list()
 
 # دریافت تاریخچه قیمت
-prices = api.get_price_history('web_id', '1400/01/01', '1400/12/29')
+prices = scraper.scrape_price_history('نماد', '1400/01/01', '1400/12/29')
 
 # اتصال به دیتابیس
 db = SQLiteDatabase()
@@ -118,7 +118,7 @@ db.add_stock({'ticker': 'ABC', 'name': 'شرکت نمونه', ...})
 فایل `config.py` شامل تنظیمات زیر است:
 
 - `DATABASE_URL`: آدرس پایگاه داده
-- `API_BASE_URL`: آدرس API بورس
+حذف شد: وابستگی به API وجود ندارد
 - `UPDATE_INTERVAL`: فاصله زمانی به‌روزرسانی (ثانیه)
 - `LOG_LEVEL`: سطح لاگ‌گیری
 - `BATCH_SIZE`: اندازه دسته‌های درج داده
@@ -147,9 +147,9 @@ python main.py --mode full --days 1
 
 ## خطاها و مشکلات رایج
 
-### خطای اتصال به API
+### خطای اسکرپ داده
 - بررسی اتصال اینترنت
-- تأیید دسترسی به `http://cdn.tsetmc.com`
+- تأیید دسترسی به `http://www.tsetmc.com`
 
 ### خطای دیتابیس
 - بررسی وجود فایل دیتابیس
