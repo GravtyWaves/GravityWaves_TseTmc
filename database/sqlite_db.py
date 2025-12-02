@@ -1,3 +1,7 @@
+def get_sqlite_session():
+    """تابع کمکی برای بازگرداندن یک session دیتابیس SQLite"""
+    db = SQLiteDatabase()
+    return db.get_session()
 from typing import List, Dict, Any, Optional
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
@@ -12,6 +16,19 @@ import logging
 logger = logging.getLogger(__name__)
 
 class SQLiteDatabase(DatabaseBase):
+    # Expose models as attributes for testing
+    Stock = Stock
+    PriceHistory = PriceHistory
+    RIHistory = RIHistory
+    Index = Index
+    IndexHistory = IndexHistory
+    Sector = Sector
+    SectorIndexHistory = SectorIndexHistory
+    Shareholder = Shareholder
+    MajorShareholderHistory = MajorShareholderHistory
+    IntradayTrade = IntradayTrade
+    USDHistory = USDHistory
+
     def add_stock(self, stock_data: Dict[str, Any]) -> Optional[Stock]:
         session = self.get_session()
         try:
@@ -25,7 +42,7 @@ class SQLiteDatabase(DatabaseBase):
                 # Ensure all attributes are loaded before expunging
                 session.refresh(existing)
                 session.expunge(existing)
-                return existing
+                return None
 
             stock = Stock(**stock_data)
             session.add(stock)
@@ -83,7 +100,7 @@ class SQLiteDatabase(DatabaseBase):
                 # Ensure all attributes are loaded before expunging
                 session.refresh(existing)
                 session.expunge(existing)
-                return existing
+                return None
 
             index = Index(**index_data)
             session.add(index)
@@ -214,5 +231,53 @@ class SQLiteDatabase(DatabaseBase):
         try:
             result = session.query(USDHistory.j_date).order_by(USDHistory.date.desc()).first()
             return result[0] if result else None
+        finally:
+            session.close()
+    
+    def add_sector(self, sector_data: Dict[str, Any]) -> Optional[Sector]:
+        """افزودن یا به‌روزرسانی صنعت"""
+        session = self.get_session()
+        try:
+            # بررسی وجود صنعت
+            existing = session.query(Sector).filter(
+                Sector.sector_code == sector_data['sector_code']
+            ).first()
+
+            if existing:
+                logger.debug(f"Sector {sector_data['sector_code']} already exists")
+                # Ensure all attributes are loaded before expunging
+                session.refresh(existing)
+                session.expunge(existing)
+                return None
+
+            sector = Sector(**sector_data)
+            session.add(sector)
+            session.commit()
+            # Ensure all attributes are loaded before expunging
+            session.refresh(sector)
+            session.expunge(sector)
+            logger.info(f"Added new sector: {sector_data['sector_name']}")
+            return sector
+
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error adding sector {sector_data.get('sector_name')}: {e}")
+            return None
+        finally:
+            session.close()
+    
+    def get_all_stocks(self) -> List[Stock]:
+        """دریافت لیست تمام سهام"""
+        session = self.get_session()
+        try:
+            return session.query(Stock).all()
+        finally:
+            session.close()
+    
+    def get_all_sectors(self) -> List[Sector]:
+        """دریافت لیست تمام صنایع"""
+        session = self.get_session()
+        try:
+            return session.query(Sector).all()
         finally:
             session.close()
